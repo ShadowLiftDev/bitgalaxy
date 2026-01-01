@@ -48,16 +48,17 @@ async function getTokenFromRequest(req: NextRequest): Promise<string | null> {
 
 /**
  * Server-component context: pull token from headers() + cookies()
+ * NOTE: headers() and cookies() are async-typed in your setup, so we await them.
  */
-function getTokenFromServerContext(): string | null {
+async function getTokenFromServerContext(): Promise<string | null> {
   try {
-    const h = headers();
+    const h = await headers();
     const authHeader = h.get("authorization");
     if (authHeader && authHeader.startsWith("Bearer ")) {
       return authHeader.slice("Bearer ".length).trim();
     }
 
-    const cookieStore = cookies();
+    const cookieStore = await cookies();
     const sessionCookie = cookieStore.get(SESSION_COOKIE_NAME);
     return sessionCookie?.value ?? null;
   } catch {
@@ -80,7 +81,7 @@ export async function getServerUser(
   if (req) {
     token = await getTokenFromRequest(req);
   } else {
-    token = getTokenFromServerContext();
+    token = await getTokenFromServerContext(); // ⬅ note the await
   }
 
   if (!token) return null;
