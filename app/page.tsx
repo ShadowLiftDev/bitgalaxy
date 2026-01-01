@@ -1,42 +1,21 @@
 import Link from "next/link";
-import { adminDb } from "@/lib/firebase-admin";
 
 const DEFAULT_ORG_ID =
   process.env.NEXT_PUBLIC_DEFAULT_ORG_ID || "neon-lunchbox";
 
-type OrgWorld = {
-  id: string;
-  name: string;
-  appsEnabled?: { BitGalaxy?: boolean };
-};
-
-async function getWorlds(): Promise<OrgWorld[]> {
-  const snap = await adminDb.collection("orgs").get();
-
-  const worlds: OrgWorld[] = [];
-  snap.forEach((doc) => {
-    const data = doc.data() as any;
-    const usesBitGalaxy = data.appsEnabled?.BitGalaxy === true;
-    if (usesBitGalaxy) {
-      worlds.push({
-        id: doc.id,
-        name: data.name ?? doc.id,
-        appsEnabled: data.appsEnabled,
-      });
-    }
-  });
-
-  // Keep the list deterministic
-  worlds.sort((a, b) => a.name.localeCompare(b.name));
-  return worlds;
-}
+const STATIC_WORLDS = [
+  {
+    id: DEFAULT_ORG_ID,
+    name: "The Neon Lunchbox",
+  },
+];
 
 export const metadata = {
   title: "BitGalaxy – Mission Entry",
 };
 
-export default async function BitGalaxyLandingPage() {
-  const worlds = await getWorlds();
+export default function BitGalaxyLandingPage() {
+  const worlds = STATIC_WORLDS;
 
   return (
     <main className="relative min-h-[70vh] space-y-12 text-xs text-sky-100">
@@ -134,7 +113,7 @@ export default async function BitGalaxyLandingPage() {
               Explore BitGalaxy demo
             </Link>
 
-            {/* NEW: direct link into the player arcade */}
+            {/* Direct link into the player arcade */}
             <Link
               href="/bitgalaxy/games"
               className="rounded-xl border border-cyan-400/80 bg-slate-950/80 px-4 py-2 text-[13px] font-semibold text-cyan-100 shadow-[0_0_26px_rgba(56,189,248,0.45)] transition hover:bg-cyan-500/10 hover:text-cyan-50"
