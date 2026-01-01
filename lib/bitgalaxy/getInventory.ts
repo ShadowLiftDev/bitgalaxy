@@ -19,5 +19,15 @@ export async function getInventory(
 
   const data = snap.data() as BitGalaxyPlayer;
 
-  return data.inventory ?? [];
+  const inv = (data.inventory ?? []).map((it: any) => ({
+    itemId: it.itemId,
+    quantity: it.quantity ?? 1,
+    label: it.label,
+    description: it.description,
+    source: it.source,
+    createdAt:
+      typeof it.createdAt?.toMillis === "function" ? it.createdAt.toMillis() : it.createdAt,
+  }));
+
+  return inv;
 }

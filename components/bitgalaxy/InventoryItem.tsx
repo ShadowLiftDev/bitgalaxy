@@ -76,7 +76,7 @@ export function InventoryItem({
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
               Qty:{" "}
               <span className="font-semibold text-sky-100">
-                {item.quantity}
+                {item.quantity ?? 1}
               </span>
             </span>
 

@@ -1,13 +1,18 @@
 import { adminDb } from "@/lib/firebase-admin";
 import { getLevelForXP, getRankForXP } from "./rankEngine";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getISOWeekKey } from "@/lib/weekKey";
 
 export interface PlayerInventoryItem {
   itemId: string;
   quantity: number;
+
+  // Optional UI/meta fields (safe even if not present in Firestore yet)
+  label?: string;
+  description?: string;
   source?: string;
-}
+  createdAt?: Timestamp; // store as ms epoch (recommended)
+};
 
 export interface BitGalaxyPlayer {
   userId: string;
