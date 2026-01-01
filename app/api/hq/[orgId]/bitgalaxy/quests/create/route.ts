@@ -1,0 +1,68 @@
+import { NextRequest, NextResponse } from "next/server";
+import { adminDb } from "@/lib/firebase-admin";
+import { requireUser, requireRole } from "@/lib/auth-server";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
+
+export const runtime = "nodejs";
+
+type Params = { orgId: string };
+
+export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<Params> },
+) {
+  try {
+    const { orgId } = await ctx.params;
+
+    if (!orgId) {
+      return NextResponse.json(
+        { error: "Missing orgId in route" },
+        { status: 400 },
+      );
+    }
+
+    // --- AUTH ---
+    const user = await requireUser(req);
+    await requireRole(orgId, user.uid, ["owner"], req);
+
+    const body = await req.json();
+
+    const questsCol = adminDb
+      .collection("orgs")
+      .doc(orgId)
+      .collection("bitgalaxyQuests");
+
+    const now = FieldValue.serverTimestamp() as Timestamp;
+
+    const docRef = questsCol.doc(); // Auto ID
+
+    const questData = {
+      title: body.title ?? "Untitled Quest",
+      description: body.description ?? "",
+      orgId,
+      programId: body.programId ?? null,
+      type: body.type ?? "custom",
+      xp: Number(body.xp ?? 0),
+      isActive: body.isActive ?? true,
+      maxCompletionsPerUser:
+        typeof body.maxCompletionsPerUser === "number"
+          ? body.maxCompletionsPerUser
+          : null,
+      checkinCode: body.checkinCode ?? null,
+      requiresStaffApproval: body.requiresStaffApproval ?? false,
+      metadata: body.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await docRef.set(questData);
+
+    return NextResponse.json({ success: true, id: docRef.id });
+  } catch (error: any) {
+    console.error("BitGalaxy HQ create quest error:", error);
+    return NextResponse.json(
+      { error: error?.message ?? "Failed to create quest" },
+      { status: 500 },
+    );
+  }
+}
