@@ -7,12 +7,14 @@ type QuestCardProps = {
   quest: BitGalaxyQuest;
   orgId: string;
 
-  // existing props
   variant?: "default" | "carousel";
   status?: QuestStatusBadge;
 
-  // NEW: for player-side routing so the ID persists in the URL
+  // Optional: the current player (used only for labels if needed later)
   userId?: string | null;
+
+  // NEW: if provided, shows a Play button; if null, card is purely informational
+  playHref?: string | null;
 };
 
 const typeLabels: Record<string, string> = {
@@ -40,17 +42,10 @@ export function QuestCard({
   orgId,
   variant = "default",
   status = "available",
-  userId, // NEW
+  userId,   // currently unused, but kept for future tweaks
+  playHref, // NEW
 }: QuestCardProps) {
   const typeLabel = typeLabels[quest.type] ?? "Quest";
-
-  const search = new URLSearchParams();
-  search.set("orgId", orgId);
-  if (userId) {
-    search.set("userId", userId);
-  }
-
-  const questUrl = `/bitgalaxy/quests/${quest.id}?${search.toString()}`;
 
   const coverImageUrl =
     (quest as any).coverImageUrl ||
@@ -59,14 +54,14 @@ export function QuestCard({
     null;
 
   return (
-    <Link
-      href={questUrl}
+    <div
       className={[
-        "group block overflow-hidden rounded-2xl border border-sky-500/40 bg-slate-950/60 hover:border-sky-300/80 hover:bg-slate-900/80 transition-colors",
+        "group overflow-hidden rounded-2xl border border-sky-500/40 bg-slate-950/60 transition-colors",
+        "hover:border-sky-300/80 hover:bg-slate-900/80",
         variant === "carousel" ? "min-h-[340px]" : "p-4",
       ].join(" ")}
     >
-      {/* Screenshot */}
+      {/* Screenshot (carousel variant) */}
       {variant === "carousel" && (
         <div className="relative">
           {coverImageUrl ? (
@@ -128,10 +123,22 @@ export function QuestCard({
         {variant === "carousel" && (
           <div className="mt-3 inline-flex items-center gap-2 text-[10px] text-sky-200/70">
             <span className="h-1.5 w-1.5 rounded-full bg-sky-400 shadow-[0_0_10px_rgba(56,189,248,0.8)]" />
-            Tap to open mission briefing
+            Mission briefing
+          </div>
+        )}
+
+        {/* NEW: play button for game quests only */}
+        {playHref && (
+          <div className="mt-4 flex justify-end">
+            <Link
+              href={playHref}
+              className="inline-flex items-center justify-center rounded-full bg-sky-500 px-3 py-1.5 text-[11px] font-semibold text-slate-950 shadow-[0_0_16px_rgba(56,189,248,0.7)] transition hover:bg-sky-400"
+            >
+              ▶ Play
+            </Link>
           </div>
         )}
       </div>
-    </Link>
+    </div>
   );
 }

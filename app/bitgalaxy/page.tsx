@@ -446,17 +446,33 @@ export default async function BitGalaxyHomePage({
                 as contracts you can accept.
               </p>
             ) : (
-          <div className="grid gap-3 sm:grid-cols-2">
-            {questsForDisplay.map((quest) => (
-              <QuestCard
-                key={quest.id}
-                quest={quest}
-                orgId={orgId}
-                userId={userId}          // ⬅ pass the current player
-              />
-            ))}
-          </div>
-            )}
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              {questsForDisplay.map((quest) => {
+                const isArcade = quest.type === "arcade";
+
+                const params = new URLSearchParams();
+                params.set("orgId", orgId);
+                if (userId) {
+                  params.set("userId", userId);
+                }
+
+                const playHref = isArcade
+                  ? `/bitgalaxy/games/${encodeURIComponent(quest.id)}?${params.toString()}`
+                  : null;
+
+                return (
+                  <QuestCard
+                    key={quest.id}
+                    quest={quest}
+                    orgId={orgId}
+                    userId={userId}
+                    playHref={playHref} // ⬅ only non-null for arcade quests
+                  />
+                );
+              })}
+            </div>
+          )}
           </div>
         </div>
 
