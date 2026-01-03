@@ -31,6 +31,9 @@ export default async function BitGalaxyHomePage({
 
   // 👉 Entry: user must be looked up first
   const userId = queryUserId || null;
+  const userQuery = userId
+    ? `?userId=${encodeURIComponent(userId)}`
+    : "";
 
   // 1) No user yet? Show the lookup gate instead of the HUD
   if (!userId) {
@@ -39,6 +42,7 @@ export default async function BitGalaxyHomePage({
         <GalaxyHeader orgName={orgId} />
 
         <section className="mt-2">
+          {/* For the main console, redirecting to /bitgalaxy is fine */}
           <PlayerLookupGate orgId={orgId} />
         </section>
 
@@ -112,6 +116,7 @@ export default async function BitGalaxyHomePage({
           </span>
         </div>
 
+        {/* Switch player = intentionally NO userQuery, so it goes back to lookup */}
         <Link
           href="/bitgalaxy"
           className="inline-flex items-center gap-1 rounded-full border border-sky-500/40 px-3 py-1 text-[10px] text-sky-200 hover:bg-sky-500/10"
@@ -261,31 +266,44 @@ export default async function BitGalaxyHomePage({
               </div>
             </div>
 
-            {/* XP progress bar */}
+            {/* XP progress bar + Arcade button */}
             <div className="rounded-2xl border border-emerald-500/40 bg-slate-950/95 p-4">
-              <div className="flex items-center justify-between text-[11px] text-emerald-200/85">
-                <span className="font-semibold text-emerald-200">
-                  Rank trajectory
-                </span>
-                <span>
-                  {progress.currentXP} /{" "}
-                  {Number.isFinite(progress.tierMaxXP)
-                    ? progress.tierMaxXP
-                    : "∞"}{" "}
-                  currentXP out of{" "}
-                  <span className="font-semibold text-emerald-100">
-                    tierMaxXP
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between text-[11px] text-emerald-200/85">
+                  <span className="font-semibold text-emerald-200">
+                    Rank trajectory
                   </span>
-                </span>
-              </div>
-              <div className="mt-3">
-                <XPProgressBar
-                  rank={progress.rank}
-                  currentXP={progress.currentXP}
-                  tierMinXP={progress.tierMinXP}
-                  tierMaxXP={progress.tierMaxXP}
-                  progressPercent={progress.progressPercent}
-                />
+                  <span>
+                    {progress.currentXP} /{" "}
+                    {Number.isFinite(progress.tierMaxXP)
+                      ? progress.tierMaxXP
+                      : "∞"}{" "}
+                    currentXP out of{" "}
+                    <span className="font-semibold text-emerald-100">
+                      tierMaxXP
+                    </span>
+                  </span>
+                </div>
+                <div className="mt-1">
+                  <XPProgressBar
+                    rank={progress.rank}
+                    currentXP={progress.currentXP}
+                    tierMinXP={progress.tierMinXP}
+                    tierMaxXP={progress.tierMaxXP}
+                    progressPercent={progress.progressPercent}
+                  />
+                </div>
+
+                {/* ⭐ Arcade / View Games button (centered) */}
+                <div className="mt-3 flex justify-center">
+                  <Link
+                    href={`/bitgalaxy/games${userQuery}`}
+                    className="inline-flex items-center gap-2 rounded-full bg-sky-500 px-5 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(56,189,248,0.7)] transition hover:bg-sky-400"
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.9)]" />
+                    Open Arcade / View Games
+                  </Link>
+                </div>
               </div>
             </div>
           </div>
@@ -294,9 +312,8 @@ export default async function BitGalaxyHomePage({
           <div className="space-y-4">
             {/* three primary stat tiles */}
             <div className="grid gap-3 text-[11px] sm:grid-cols-3 lg:grid-cols-1">
-
               <Link
-                href="/bitgalaxy/history"
+                href={`/bitgalaxy/history${userQuery}`}
                 className="group rounded-2xl border border-sky-500/40 bg-slate-950/95 p-3 shadow-[0_0_20px_rgba(56,189,248,0.5)] transition hover:border-sky-400/90 hover:shadow-[0_0_30px_rgba(56,189,248,0.8)]"
               >
                 <div className="flex items-center justify-between">
@@ -316,7 +333,7 @@ export default async function BitGalaxyHomePage({
               </Link>
 
               <Link
-                href="/bitgalaxy/profile"
+                href={`/bitgalaxy/profile${userQuery}`}
                 className="group rounded-2xl border border-violet-500/40 bg-slate-950/95 p-3 shadow-[0_0_20px_rgba(139,92,246,0.55)] transition hover:border-violet-400/90 hover:shadow-[0_0_30px_rgba(139,92,246,0.85)]"
               >
                 <div className="flex items-center justify-between">
@@ -344,37 +361,35 @@ export default async function BitGalaxyHomePage({
 
               <div className="mt-3 grid gap-2">
                 <Link
-                  href="/bitgalaxy/checkin"
+                  href={`/bitgalaxy/checkin${userQuery}`}
                   className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/95 px-3 py-2 transition hover:border-emerald-400/80 hover:bg-slate-900"
                 >
                   <span>Player check-in terminal</span>
                   <span className="text-slate-400">&gt;</span>
                 </Link>
                 <Link
-                  href="/bitgalaxy/leaderboards"
+                  href={`/bitgalaxy/leaderboards${userQuery}`}
                   className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/95 px-3 py-2 transition hover:border-sky-400/80 hover:bg-slate-900"
                 >
                   <span>World leaderboards</span>
                   <span className="text-slate-400">&gt;</span>
                 </Link>
                 <Link
-                  href="/bitgalaxy/worlds"
+                  href={`/bitgalaxy/worlds${userQuery}`}
                   className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/95 px-3 py-2 transition hover:border-violet-400/80 hover:bg-slate-900"
                 >
                   <span>World explorer</span>
                   <span className="text-slate-400">&gt;</span>
                 </Link>
                 <Link
-                  href={`/bitgalaxy/notifications?userId=${encodeURIComponent(
-                    userId || ""
-                  )}`}
+                  href={`/bitgalaxy/notifications${userQuery}`}
                   className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/95 px-3 py-2 transition hover:border-sky-300/80 hover:bg-slate-900"
                 >
                   <span>View notifications</span>
                   <span className="text-slate-400">&gt;</span>
                 </Link>
                 <Link
-                  href="/bitgalaxy/settings"
+                  href={`/bitgalaxy/settings${userQuery}`}
                   className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/95 px-3 py-2 transition hover:border-slate-400/80 hover:bg-slate-900"
                 >
                   <span>Player settings</span>
@@ -433,9 +448,7 @@ export default async function BitGalaxyHomePage({
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
                 {questsForDisplay.map((quest) => (
-                  <div key={quest.id} className="pointer-events-none">
-                  <QuestCard quest={quest} orgId={orgId} />
-                  </div>
+                  <QuestCard key={quest.id} quest={quest} orgId={orgId} />
                 ))}
               </div>
             )}
