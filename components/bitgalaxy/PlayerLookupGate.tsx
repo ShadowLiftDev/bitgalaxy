@@ -5,11 +5,24 @@ import { useRouter } from "next/navigation";
 
 type PlayerLookupGateProps = {
   orgId: string;
+  /**
+   * Where to send the user once we have a userId.
+   * Defaults to "/bitgalaxy" (the main player dashboard).
+   *
+   * Examples:
+   *   - "/bitgalaxy"             → /bitgalaxy?userId=XYZ
+   *   - "/bitgalaxy/games"       → /bitgalaxy/games?userId=XYZ
+   *   - "/bitgalaxy/tutorial"    → /bitgalaxy/tutorial?userId=XYZ
+   */
+  redirectBase?: string;
 };
 
 type LookupMode = "email" | "phone";
 
-export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
+export function PlayerLookupGate({
+  orgId,
+  redirectBase = "/bitgalaxy",
+}: PlayerLookupGateProps) {
   const router = useRouter();
 
   const [mode, setMode] = useState<LookupMode>("phone");
@@ -64,8 +77,12 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
       const json = await res.json().catch(() => ({}));
 
       if (res.ok && json.success && json.userId) {
-        // ✅ Found player → redirect to dashboard
-        router.push(`/bitgalaxy?userId=${encodeURIComponent(json.userId as string)}`);
+        // ✅ Found player → redirect to wherever this gate is configured for
+        router.push(
+          `${redirectBase}?userId=${encodeURIComponent(
+            json.userId as string,
+          )}`,
+        );
         return;
       }
 
@@ -76,7 +93,9 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
           "We couldn’t find a player with that info. You can create a BitGalaxy profile below to start earning XP.",
         );
       } else {
-        throw new Error(json.error || "We couldn’t find a player with that info.");
+        throw new Error(
+          json.error || "We couldn’t find a player with that info.",
+        );
       }
     } catch (err: any) {
       console.error("Player lookup failed:", err);
@@ -127,8 +146,12 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
         throw new Error(json.error || "Failed to create player profile.");
       }
 
-      // 🚀 New player created → send them to their dashboard
-      router.push(`/bitgalaxy?userId=${encodeURIComponent(json.userId as string)}`);
+      // 🚀 New player created → send them to the configured destination
+      router.push(
+        `${redirectBase}?userId=${encodeURIComponent(
+          json.userId as string,
+        )}`,
+      );
     } catch (err: any) {
       console.error("Player join failed:", err);
       setError(err?.message ?? "Failed to create player profile.");
@@ -153,7 +176,9 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
               Player Access Gate
             </div>
             <h1 className="mt-2 text-base font-semibold text-sky-50">
-              {joinMode ? "Create your BitGalaxy profile" : "Find your BitGalaxy profile"}
+              {joinMode
+                ? "Create your BitGalaxy profile"
+                : "Find your BitGalaxy profile"}
             </h1>
             <p className="text-[11px] text-sky-200/85">
               {joinMode
@@ -212,8 +237,8 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
                   className="w-full rounded-lg border border-sky-500/40 bg-slate-950/80 px-3 py-2 text-xs text-sky-50 outline-none placeholder:text-sky-400/60 focus:border-sky-300"
                 />
                 <p className="text-[10px] text-sky-400/80">
-                  Use the same email you used when you first checked in or joined the
-                  loyalty list at this venue.
+                  Use the same email you used when you first checked in or joined
+                  the loyalty list at this venue.
                 </p>
               </div>
             ) : (
@@ -229,8 +254,8 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
                   className="w-full rounded-lg border border-sky-500/40 bg-slate-950/80 px-3 py-2 text-xs text-sky-50 outline-none placeholder:text-sky-400/60 focus:border-sky-300"
                 />
                 <p className="text-[10px] text-sky-400/80">
-                  Use the phone number staff enter when looking you up in RewardCircle
-                  or BitGalaxy.
+                  Use the phone number staff enter when looking you up in
+                  RewardCircle or BitGalaxy.
                 </p>
               </div>
             )}
@@ -305,7 +330,8 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
 
             <div className="space-y-1.5">
               <label className="text-[11px] font-medium text-emerald-200">
-                Phone number <span className="text-emerald-400/70">(recommended)</span>
+                Phone number{" "}
+                <span className="text-emerald-400/70">(recommended)</span>
               </label>
               <input
                 type="tel"
@@ -318,7 +344,8 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
 
             <div className="space-y-1.5">
               <label className="text-[11px] font-medium text-emerald-200">
-                Email address <span className="text-emerald-400/70">(optional)</span>
+                Email address{" "}
+                <span className="text-emerald-400/70">(optional)</span>
               </label>
               <input
                 type="email"
@@ -328,8 +355,8 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
                 placeholder="you@example.com"
               />
               <p className="text-[10px] text-emerald-300/80">
-                Phone or email is required so staff can find you later. You can add the
-                other in Player Settings at any time.
+                Phone or email is required so staff can find you later. You can add
+                the other in Player Settings at any time.
               </p>
             </div>
 
@@ -367,14 +394,15 @@ export function PlayerLookupGate({ orgId }: PlayerLookupGateProps) {
 
         {!joinMode && (
           <p className="text-[10px] text-sky-400/80">
-            Once we find your player ID, we’ll load your full mission dashboard for this
-            world — XP, quests, inventory, and more.
+            Once we find your player ID, we’ll load your full mission dashboard
+            for this world — XP, quests, inventory, and more.
           </p>
         )}
         {joinMode && (
           <p className="text-[10px] text-emerald-300/80">
-            Your ID is tied to this world only. When we bring more worlds online, you’ll
-            be able to sync your profile across the Neon Ecosystem.
+            Your ID is tied to this world only. When we bring more worlds
+            online, you’ll be able to sync your profile across the Neon
+            Ecosystem.
           </p>
         )}
       </div>
