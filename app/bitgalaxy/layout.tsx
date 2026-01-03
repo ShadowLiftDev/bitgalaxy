@@ -48,17 +48,9 @@ export default function BitGalaxyLayout({ children }: { children: ReactNode }) {
                   <Home size={16} strokeWidth={2} />
                 </Link>
 
-                {/* Notifications icon */}
-                <Link
-                  href="/bitgalaxy/notifications"
-                  className="rounded-full p-1 text-slate-300 transition hover:bg-slate-800 hover:text-amber-300"
-                >
-                  <Bell size={16} strokeWidth={2} />
-                </Link>
-
                 {/* Text version tag */}
                 <span className="rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-0.5 font-mono text-[10px] text-slate-300">
-                  v2 · MULTI-WORLD
+                 The Neon Lunchbox
                 </span>
               </div>
             </div>
