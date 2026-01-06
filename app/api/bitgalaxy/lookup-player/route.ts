@@ -16,19 +16,34 @@ function normalizeEmail(email?: string) {
   return e || null;
 }
 
-function normalizePhone(phone?: string) {
+function phoneDigitsAll(phone?: string) {
   const digits = (phone ?? "").replace(/[^\d]/g, "");
+  return digits || null;
+}
+
+function last10(digits?: string | null) {
   if (!digits) return null;
-  // last 10 digits covers (727) XXX-XXXX inputs reliably
   return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function e164USFromDigits(digits?: string | null) {
+  if (!digits) return null;
+
+  // 10 digits => assume US
+  if (digits.length === 10) return `+1${digits}`;
+
+  // 11 digits starting with 1 => US with country code
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+
+  return null;
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as Partial<Body>;
+
     const orgId = body.orgId?.trim();
     const email = normalizeEmail(body.email);
-    const phoneDigits = normalizePhone(body.phone);
     const phoneRaw = (body.phone ?? "").trim();
 
     if (!orgId) {
@@ -53,7 +68,7 @@ export async function POST(req: NextRequest) {
       .doc(orgId)
       .collection("bitgalaxyPlayers");
 
-    // 1) Email lookup (your stored doc uses lowercase email already)
+    // 1) Email lookup
     if (email) {
       const snap = await playersRef.where("email", "==", email).limit(1).get();
       if (!snap.empty) {
@@ -61,16 +76,42 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 2) Phone lookup (try common schemas)
+    // 2) Phone lookup
     if (phoneRaw) {
-      const candidates: Array<{ field: string; value: string | null }> = [
-        { field: "phone", value: phoneDigits },
-        { field: "phone", value: phoneRaw },
-        { field: "phoneNormalized", value: phoneDigits },
-        { field: "phoneDigits", value: phoneDigits },
+      const digitsAll = phoneDigitsAll(phoneRaw);
+      const digits10 = last10(digitsAll);
+
+      // If digitsAll is 11 and starts with 1, or is 10 digits, this yields +1...
+      const e164 =
+        e164USFromDigits(digitsAll) || (digits10 ? `+1${digits10}` : null);
+
+      const candidates: Array<string> = [
+        // Key fix: match stored "+1555..." from "555..."
+        e164,
+
+        // If user typed +1555... exactly, try it too
+        phoneRaw.startsWith("+") ? phoneRaw : null,
+
+        // Legacy/exact attempts
+        digits10,
+        phoneRaw,
+      ].filter(Boolean) as string[];
+
+      for (const value of candidates) {
+        const snap = await playersRef.where("phone", "==", value).limit(1).get();
+        if (!snap.empty) {
+          return NextResponse.json({ success: true, userId: snap.docs[0].id });
+        }
+      }
+
+      // Optional: keep these if you *might* have mixed schemas
+      // (safe to keep; they just cost extra queries)
+      const altCandidates: Array<{ field: string; value: string | null }> = [
+        { field: "phoneNormalized", value: digits10 },
+        { field: "phoneDigits", value: digits10 },
       ];
 
-      for (const c of candidates) {
+      for (const c of altCandidates) {
         if (!c.value) continue;
         const snap = await playersRef.where(c.field, "==", c.value).limit(1).get();
         if (!snap.empty) {
