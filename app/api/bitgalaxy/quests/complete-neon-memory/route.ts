@@ -5,7 +5,6 @@ import { getActiveQuests } from "@/lib/bitgalaxy/getActiveQuests";
 import { getPlayer } from "@/lib/bitgalaxy/getPlayer";
 import { getRankProgress } from "@/lib/bitgalaxy/rankEngine";
 import { ensureArcadeQuestExists } from "@/lib/bitgalaxy/ensureArcadeQuestExists";
-import { requireUser } from "@/lib/auth-server";
 import { updateXP } from "@/lib/bitgalaxy/updateXP";
 import { writeAuditLog } from "@/lib/bitgalaxy/auditLog";
 import { getISOWeekKey } from "@/lib/weekKey";
@@ -50,15 +49,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: "Missing orgId or userId" },
         { status: 400 },
-      );
-    }
-
-    // Must be acting as same authed user
-    const acting = await requireUser(req);
-    if (acting.uid !== targetUserId) {
-      return NextResponse.json(
-        { error: "You can only submit your own Neon Memory run." },
-        { status: 403 },
       );
     }
 
