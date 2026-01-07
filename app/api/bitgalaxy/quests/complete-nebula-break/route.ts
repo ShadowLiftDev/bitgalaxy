@@ -5,7 +5,7 @@ import { getActiveQuests } from "@/lib/bitgalaxy/getActiveQuests";
 import { getPlayer } from "@/lib/bitgalaxy/getPlayer";
 import { getRankProgress } from "@/lib/bitgalaxy/rankEngine";
 import { ensureArcadeQuestExists } from "@/lib/bitgalaxy/ensureArcadeQuestExists";
-import { requireUser } from "@/lib/auth-server";
+// ✅ no requireUser import here
 import { updateXP } from "@/lib/bitgalaxy/updateXP";
 import { writeAuditLog } from "@/lib/bitgalaxy/auditLog";
 import { getISOWeekKey } from "@/lib/weekKey";
@@ -13,6 +13,12 @@ import { getISOWeekKey } from "@/lib/weekKey";
 export const runtime = "nodejs";
 
 type LevelDef = { label?: string; xp: number; description?: string };
+
+type NebulaBreakStats = {
+  score?: number;
+  bricks?: number;
+  timeMs?: number;
+};
 
 function xpForLevel(
   level: number,
@@ -35,30 +41,16 @@ function xpForLevel(
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+
     const orgId = body.orgId as string | undefined;
     const targetUserId = body.userId as string | undefined;
-    const level = Number(body.level || 1);
-
-    const stats = body.stats as
-      | {
-          score?: number;
-          bricks?: number;
-          timeMs?: number;
-        }
-      | undefined;
+    const rawLevel = Number(body.level || 1);
+    const stats = body.stats as NebulaBreakStats | undefined;
 
     if (!orgId || !targetUserId) {
       return NextResponse.json(
         { error: "Missing orgId or userId" },
         { status: 400 },
-      );
-    }
-
-    const acting = await requireUser(req);
-    if (acting.uid !== targetUserId) {
-      return NextResponse.json(
-        { error: "You can only submit your own Nebula Break run." },
-        { status: 403 },
       );
     }
 
@@ -85,7 +77,6 @@ export async function POST(req: NextRequest) {
       null;
 
     const baseXP = Number(questData.xp || 75);
-
     const weekKey = getISOWeekKey(new Date());
 
     const playerRef = adminDb
@@ -99,10 +90,19 @@ export async function POST(req: NextRequest) {
     let xpAwarded = 0;
     let newBestLevel = 0;
 
+    // Clamp level between 1 and 3 (we can later add deterministic tiering from stats)
+    const requestedLevel = Math.max(
+      1,
+      Math.min(3, Math.floor(rawLevel || 1)),
+    );
+
     await adminDb.runTransaction(async (tx) => {
       const snap = await tx.get(playerRef);
       if (!snap.exists) {
-        throw new Error(`Player ${targetUserId} does not exist in org ${orgId}`);
+        // Distinct code so we can return 404
+        throw new Error(
+          `PLAYER_NOT_FOUND::Player ${targetUserId} does not exist in org ${orgId}`,
+        );
       }
 
       const data = (snap.data() || {}) as any;
@@ -120,8 +120,6 @@ export async function POST(req: NextRequest) {
       const prevWeekKey = String(nb.weekKey || "");
       const prevBestLevel =
         prevWeekKey === weekKey ? Number(nb.bestLevel || 0) : 0;
-
-      const requestedLevel = Math.max(1, Math.min(3, Math.floor(level || 1)));
 
       if (requestedLevel <= prevBestLevel) {
         throw new Error("NEBULA_BREAK_TIER_ALREADY_RECORDED");
@@ -146,7 +144,7 @@ export async function POST(req: NextRequest) {
       const bestBricks = nb.bestBricks ?? null;
       const bestTimeMs = nb.bestTimeMs ?? null;
 
-      // For Nebula: higher score/bricks are better, longer survival time better
+      // For Nebula: higher score/bricks and longer survival time are better
       const nextBestScore =
         score !== null
           ? bestScore === null
@@ -241,7 +239,9 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error("BitGalaxy complete-nebula-break error:", error);
 
-    if (error?.message === "NEBULA_BREAK_TIER_ALREADY_RECORDED") {
+    const msg = String(error?.message || "");
+
+    if (msg === "NEBULA_BREAK_TIER_ALREADY_RECORDED") {
       return NextResponse.json(
         {
           error:
@@ -251,7 +251,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (error?.message === "NEBULA_BREAK_NO_XP_DELTA") {
+    if (msg === "NEBULA_BREAK_NO_XP_DELTA") {
       return NextResponse.json(
         {
           error:
@@ -261,10 +261,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (msg.startsWith("PLAYER_NOT_FOUND::")) {
+      return NextResponse.json(
+        {
+          error:
+            "Player profile not found in this world. Refresh the BitGalaxy dashboard and re-link your ID.",
+        },
+        { status: 404 },
+      );
+    }
+
     return NextResponse.json(
       {
-        error:
-          error?.message ?? "Failed to complete Nebula Break quest",
+        error: error?.message ?? "Failed to complete Nebula Break quest",
       },
       { status: 500 },
     );

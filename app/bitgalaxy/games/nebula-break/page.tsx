@@ -14,16 +14,26 @@ export const metadata = {
 };
 
 export default async function NebulaBreakPage(props: NebulaBreakPageProps) {
-  const resolvedSearch = props.searchParams ? await props.searchParams : {};
-  const orgId = (resolvedSearch.orgId ?? DEFAULT_ORG_ID).trim();
-  const userId = resolvedSearch.userId ?? null;
+  const resolved =
+    (props.searchParams ? await props.searchParams : {}) as {
+      orgId?: string;
+      userId?: string;
+      guest?: string;
+    };
 
-  if (!userId) {
+  const orgId = (resolved.orgId ?? DEFAULT_ORG_ID).trim();
+  const isGuest = resolved.guest === "1";
+  const userId = !isGuest && resolved.userId ? resolved.userId : null;
+
+  if (!isGuest && !userId) {
     return (
       <div className="space-y-6">
         <GalaxyHeader orgName={orgId} />
         <section className="mt-2">
-          <PlayerLookupGate orgId={orgId} redirectBase="/bitgalaxy/games/nebula-break" />
+          <PlayerLookupGate
+            orgId={orgId}
+            redirectBase="/bitgalaxy/games/nebula-break"
+          />
         </section>
       </div>
     );
@@ -33,7 +43,7 @@ export default async function NebulaBreakPage(props: NebulaBreakPageProps) {
     <div className="space-y-6">
       <GalaxyHeader orgName={orgId} />
       <section>
-        <NebulaBreakGame orgId={orgId} userId={userId} />
+        <NebulaBreakGame orgId={orgId} userId={userId} isGuest={isGuest} />
       </section>
     </div>
   );

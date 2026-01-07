@@ -6,7 +6,8 @@ import { GameQuestShell } from "./GameQuestShell";
 
 type GalaxyPaddleGameProps = {
   orgId: string;
-  userId: string;
+  userId: string | null;
+  isGuest: boolean;
 };
 
 type GameConfig = {
@@ -35,9 +36,29 @@ type GameState = {
   velY: number;
   running: boolean;
   gameOver: boolean;
+  hits: number;
+  maxSpeed: number;
 };
 
-export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
+function computeTierFromStats(hits: number, elapsedMs: number): 1 | 2 | 3 {
+  const sec = elapsedMs / 1000;
+
+  // Tunable thresholds
+  const t1 = sec >= 10 || hits >= 5;
+  const t2 = sec >= 25 || hits >= 15;
+  const t3 = sec >= 45 || hits >= 30;
+
+  if (t3) return 3;
+  if (t2) return 2;
+  if (t1) return 1;
+  return 1;
+}
+
+export function GalaxyPaddleGame({
+  orgId,
+  userId,
+  isGuest,
+}: GalaxyPaddleGameProps) {
   const router = useRouter();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const gameStateRef = useRef<GameState | null>(null);
@@ -63,23 +84,10 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
 
   const seconds = (elapsedMs / 1000).toFixed(1);
 
-  function computeTierFromStats(): 1 | 2 | 3 {
-    const sec = elapsedMs / 1000;
-
-    // Tune these whenever you want
-    const t1 = sec >= 10 || hits >= 5;
-    const t2 = sec >= 25 || hits >= 15;
-    const t3 = sec >= 45 || hits >= 30;
-
-    if (t3) return 3;
-    if (t2) return 2;
-    if (t1) return 1;
-    return 1;
-  }
-
   function initGameState() {
     const { width, height, paddleWidth, paddleMarginBottom } = CONFIG;
     const paddleX = (width - paddleWidth) / 2;
+    const initialSpeed = Math.sqrt(2.2 * 2.2 + 3.0 * 3.0);
 
     gameStateRef.current = {
       paddleX,
@@ -89,10 +97,12 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
       velY: -3.0,
       running: false,
       gameOver: false,
+      hits: 0,
+      maxSpeed: initialSpeed,
     };
 
     setHits(0);
-    setMaxSpeed(Math.sqrt(2.2 * 2.2 + 3.0 * 3.0));
+    setMaxSpeed(initialSpeed);
     setElapsedMs(0);
     setIsRunning(false);
     setGameOver(false);
@@ -119,14 +129,26 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
 
     const drawFrame = () => {
       const state = gameStateRef.current;
-      if (!state) return;
+      if (!state) {
+        animationRef.current = requestAnimationFrame(drawFrame);
+        return;
+      }
 
-      const { paddleX } = state;
-      let { ballX, ballY, velX, velY, running, gameOver } = state;
+      let {
+        paddleX,
+        ballX,
+        ballY,
+        velX,
+        velY,
+        running,
+        gameOver: stateGameOver,
+        hits: localHits,
+        maxSpeed: localMaxSpeed,
+      } = state;
 
       const now = performance.now();
 
-      if (running && !gameOver) {
+      if (running && !stateGameOver) {
         if (timerStartRef.current == null) {
           timerStartRef.current = now;
         }
@@ -177,20 +199,25 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
           velX = normX * newSpeed;
           velY = normY * newSpeed;
 
-          setHits((h) => h + 1);
-          setMaxSpeed((prev) => Math.max(prev, newSpeed));
+          localHits += 1;
+          localMaxSpeed = Math.max(localMaxSpeed, newSpeed);
+
+          setHits(localHits);
+          setMaxSpeed(localMaxSpeed);
         }
 
         // miss
         if (ballY - ballRadius > height) {
           running = false;
-          gameOver = true;
+          stateGameOver = true;
           setIsRunning(false);
           setGameOver(true);
 
-          // lock tier at end of run
-          const computed = computeTierFromStats();
-          setTier(computed);
+          // Deterministic tier calculation based on the final stats
+          const finalElapsed =
+            timerStartRef.current != null ? now - timerStartRef.current : elapsedMs;
+          const computedTier = computeTierFromStats(localHits, finalElapsed);
+          setTier(computedTier);
         }
 
         gameStateRef.current = {
@@ -200,7 +227,9 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
           velX,
           velY,
           running,
-          gameOver,
+          gameOver: stateGameOver,
+          hits: localHits,
+          maxSpeed: localMaxSpeed,
         };
       }
 
@@ -303,8 +332,16 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
   }
 
   async function handleSubmitCompletion() {
-    if (submitting) return;
-    if (!gameOver) return;
+    if (submitting || !gameOver) return;
+
+    // Guest mode: allow play, but no XP / quest logging
+    if (isGuest || !userId) {
+      setSubmitError(
+        "You’re playing as a guest. Sign in on the BitGalaxy dashboard to log XP and quest progress.",
+      );
+      setSubmitSuccess(false);
+      return;
+    }
 
     setSubmitting(true);
     setSubmitError(null);
@@ -334,7 +371,8 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
       setSubmitSuccess(true);
 
       setTimeout(() => {
-        router.push(`/bitgalaxy?userId=${encodeURIComponent(userId)}`);
+        const params = new URLSearchParams({ orgId, userId });
+        router.push(`/bitgalaxy?${params.toString()}`);
       }, 900);
     } catch (err: any) {
       console.error("Galaxy Paddle completion error:", err);
@@ -347,13 +385,21 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
     }
   }
 
+  const submitLabel = isGuest
+    ? "Sign in to log XP"
+    : submitting
+    ? "Syncing…"
+    : gameOver
+    ? `Log Tier ${tier} & award XP`
+    : "Finish a run to log XP";
+
   return (
     <GameQuestShell
       badgeLabel="Side Quest"
       title="Galaxy Paddle"
       subtitle="Hold the defensive line. Keep the neon core in play as long as you can."
       orgId={orgId}
-      userId={userId}
+      userId={userId ?? ""} // guests pass an empty string; shell can ignore / treat as unl inked
     >
       <div className="flex flex-col gap-3 rounded-2xl border border-sky-500/40 bg-slate-950/95 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex gap-4 text-[11px]">
@@ -385,7 +431,7 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
           </div>
         </div>
 
-        <div className="mt-2 flex items-center gap-3 text-[11px] sm:mt-0">
+        <div className="mt-2 flex flex-col items-start gap-2 text-[11px] sm:mt-0 sm:flex-row sm:items-center sm:gap-3">
           {gameOver ? (
             <span className="inline-flex items-center gap-1 rounded-full border border-rose-400/60 bg-rose-500/10 px-3 py-1 text-rose-200">
               <span className="h-2 w-2 rounded-full bg-rose-400 shadow-[0_0_12px_rgba(248,113,113,0.8)]" />
@@ -399,6 +445,13 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
           ) : (
             <span className="inline-flex items-center gap-1 rounded-full border border-slate-500/60 bg-slate-900/80 px-3 py-1 text-slate-200/90">
               Move the paddle to begin
+            </span>
+          )}
+
+          {isGuest && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/60 bg-amber-500/10 px-3 py-1 text-amber-200">
+              <span className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.9)]" />
+              Guest mode — XP won’t be logged
             </span>
           )}
 
@@ -429,7 +482,9 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
         </div>
       </div>
 
-      {submitError && <p className="mt-3 text-[11px] text-rose-300">{submitError}</p>}
+      {submitError && (
+        <p className="mt-3 text-[11px] text-rose-300">{submitError}</p>
+      )}
       {submitSuccess && (
         <p className="mt-3 text-[11px] text-emerald-300">
           Mission synced. Updating BitGalaxy…
@@ -440,14 +495,10 @@ export function GalaxyPaddleGame({ orgId, userId }: GalaxyPaddleGameProps) {
         <button
           type="button"
           onClick={handleSubmitCompletion}
-          disabled={submitting || !gameOver}
+          disabled={submitting || !gameOver || isGuest}
           className="inline-flex items-center justify-center rounded-full bg-sky-500 px-4 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(56,189,248,0.7)] transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {submitting
-            ? "Syncing…"
-            : gameOver
-            ? `Log Tier ${tier} & award XP`
-            : "Finish a run to log XP"}
+          {submitLabel}
         </button>
       </div>
     </GameQuestShell>

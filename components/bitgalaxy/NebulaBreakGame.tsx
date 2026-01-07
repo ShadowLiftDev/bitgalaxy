@@ -6,7 +6,8 @@ import { GameQuestShell } from "./GameQuestShell";
 
 type NebulaBreakGameProps = {
   orgId: string;
-  userId: string;
+  userId: string | null;   // allow null – URL lookup may not have happened (guest)
+  isGuest: boolean;        // explicit guest mode (no XP, no API call)
 };
 
 type GameConfig = {
@@ -16,7 +17,7 @@ type GameConfig = {
   paddleHeight: number;
   paddleMarginBottom: number;
   ballRadius: number;
-  brickRows: number;      // base rows for level 1
+  brickRows: number;
   brickCols: number;
   brickWidth: number;
   brickHeight: number;
@@ -66,7 +67,7 @@ function getLevelParams(level: number) {
   return { rows, speedScale };
 }
 
-export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
+export function NebulaBreakGame({ orgId, userId, isGuest }: NebulaBreakGameProps) {
   const router = useRouter();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const gameStateRef = useRef<GameState | null>(null);
@@ -93,6 +94,9 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState(false);
 
+  // guest mode hint (for UX)
+  const [guestHintShown, setGuestHintShown] = useState(false);
+
   // timer
   const timerStartRef = useRef<number | null>(null);
 
@@ -113,10 +117,8 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
     const bricks: Brick[] = [];
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < brickCols; col++) {
-        const x =
-          brickOffsetLeft + col * (brickWidth + brickPadding);
-        const y =
-          brickOffsetTop + row * (brickHeight + brickPadding);
+        const x = brickOffsetLeft + col * (brickWidth + brickPadding);
+        const y = brickOffsetTop + row * (brickHeight + brickPadding);
         bricks.push({
           x,
           y,
@@ -148,8 +150,7 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
     paddleWidthRef.current = CONFIG.paddleWidth;
 
     // random starting X + random horizontal direction
-    const startX =
-      Math.random() * (width - ballRadius * 2) + ballRadius;
+    const startX = Math.random() * (width - ballRadius * 2) + ballRadius;
     const dirX = Math.random() < 0.5 ? -1 : 1;
 
     const { speedScale } = getLevelParams(forLevel);
@@ -176,6 +177,7 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
     setAllCleared(false);
     setSubmitError(null);
     setSubmitSuccess(false);
+    setGuestHintShown(false);
     timerStartRef.current = null;
   }
 
@@ -246,10 +248,8 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
         }
 
         // paddle collision
-        const paddleTopY =
-          height - paddleMarginBottom - paddleHeight;
-        const paddleBottomY =
-          height - paddleMarginBottom;
+        const paddleTopY = height - paddleMarginBottom - paddleHeight;
+        const paddleBottomY = height - paddleMarginBottom;
 
         if (
           ballY + ballRadius >= paddleTopY &&
@@ -298,14 +298,9 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
               localPowerUps++;
 
               if (brick.powerUp === "wide") {
-                // +25% paddle width each time, with a sane cap
-                const nextWidth =
-                  paddleWidthRef.current * 1.25;
+                const nextWidth = paddleWidthRef.current * 1.25;
                 const maxWidth = CONFIG.width * 0.9;
-                paddleWidthRef.current = Math.min(
-                  nextWidth,
-                  maxWidth,
-                );
+                paddleWidthRef.current = Math.min(nextWidth, maxWidth);
               } else if (brick.powerUp === "slow") {
                 velX *= 0.7;
                 velY *= 0.7;
@@ -319,9 +314,7 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
           setScore((prev) => prev + localScoreDelta);
         }
         if (localPowerUps > 0) {
-          setPowerUpsCollected(
-            (prev) => prev + localPowerUps,
-          );
+          setPowerUpsCollected((prev) => prev + localPowerUps);
         }
 
         // all cleared?
@@ -374,26 +367,10 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
       // nebula clouds
       ctx.fillStyle = "rgba(56,189,248,0.05)";
       ctx.beginPath();
-      ctx.ellipse(
-        width * 0.3,
-        height * 0.35,
-        80,
-        40,
-        0,
-        0,
-        Math.PI * 2,
-      );
+      ctx.ellipse(width * 0.3, height * 0.35, 80, 40, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.beginPath();
-      ctx.ellipse(
-        width * 0.7,
-        height * 0.25,
-        70,
-        32,
-        0,
-        0,
-        Math.PI * 2,
-      );
+      ctx.ellipse(width * 0.7, height * 0.25, 70, 32, 0, 0, Math.PI * 2);
       ctx.fill();
 
       // bricks
@@ -462,9 +439,7 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
   }
 
   function handlePointerMove(
-    e:
-      | React.PointerEvent<HTMLDivElement>
-      | React.MouseEvent<HTMLDivElement>,
+    e: React.PointerEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>,
   ) {
     const state = gameStateRef.current;
     if (!state) return;
@@ -474,16 +449,11 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
     const scaleX = CONFIG.width / container.width;
 
     const paddleCenterX = relativeX * scaleX;
-    let newPaddleX =
-      paddleCenterX - paddleWidthRef.current / 2;
+    let newPaddleX = paddleCenterX - paddleWidthRef.current / 2;
 
     if (newPaddleX < 0) newPaddleX = 0;
-    if (
-      newPaddleX + paddleWidthRef.current >
-      CONFIG.width
-    ) {
-      newPaddleX =
-        CONFIG.width - paddleWidthRef.current;
+    if (newPaddleX + paddleWidthRef.current > CONFIG.width) {
+      newPaddleX = CONFIG.width - paddleWidthRef.current;
     }
 
     gameStateRef.current = {
@@ -508,10 +478,21 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
 
   async function handleSubmitCompletion() {
     if (submitting) return;
+
+    // guest / no userId: do NOT hit the API
+    if (isGuest || !userId) {
+      if (!guestHintShown) {
+        setGuestHintShown(true);
+        setSubmitError(
+          "Guest runs are just for fun. Link your BitGalaxy profile from the dashboard to log XP.",
+        );
+      }
+      setSubmitSuccess(false);
+      return;
+    }
+
     if (!gameOver) {
-      setSubmitError(
-        "Finish your run before logging the mission.",
-      );
+      setSubmitError("Finish your run before logging the mission.");
       return;
     }
 
@@ -522,27 +503,22 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
     setSubmitError(null);
 
     try {
-      const res = await fetch(
-        "/api/bitgalaxy/quests/complete-nebula-break",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            orgId,
-            userId,
-            questId: "nebula-break",
-            level: levelRef.current, // tie into 3-tier XP
-            stats: {
-              score,
-              bricks: bricksBroken,      // new API field
-              bricksBroken,              // keep for safety
-              powerUpsCollected,
-              timeMs: Math.round(elapsedMs),
-              cleared: allCleared,
-            },
-          }),
-        },
-      );
+      const res = await fetch("/api/bitgalaxy/quests/complete-nebula-break", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orgId,
+          userId, // trusted from URL lookup
+          questId: "nebula-break",
+          level: levelRef.current,
+          stats: {
+            score,
+            bricks: bricksBroken,
+            timeMs: Math.round(elapsedMs),
+            cleared: allCleared,
+          },
+        }),
+      });
 
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -551,8 +527,9 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
 
       setSubmitSuccess(true);
 
+      const qs = new URLSearchParams({ orgId, userId });
       setTimeout(() => {
-        router.push(`/bitgalaxy?userId=${encodeURIComponent(userId)}`);
+        router.push(`/bitgalaxy?${qs.toString()}`);
       }, 900);
     } catch (err: any) {
       console.error("Nebula Break completion error:", err);
@@ -570,7 +547,8 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
       title="Nebula Break"
       subtitle="Shatter the nebula grid. Clear as many bricks as you can and trigger neon power-ups."
       orgId={orgId}
-      userId={userId}
+      userId={userId}      // may be null – shell now handles guest display
+      isGuest={isGuest}
     >
       {/* Stats + difficulty header */}
       <div className="flex flex-col gap-3 rounded-2xl border border-sky-500/40 bg-slate-950/95 p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -713,7 +691,11 @@ export function NebulaBreakGame({ orgId, userId }: NebulaBreakGameProps) {
           disabled={submitting}
           className="inline-flex items-center justify-center rounded-full bg-sky-500 px-4 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(56,189,248,0.7)] transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {submitting ? "Syncing…" : "Log mission & award XP"}
+          {submitting
+            ? "Syncing…"
+            : isGuest || !userId
+            ? "Guest run (XP disabled)"
+            : "Log mission & award XP"}
         </button>
       </div>
     </GameQuestShell>

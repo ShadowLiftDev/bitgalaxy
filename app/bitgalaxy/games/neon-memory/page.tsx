@@ -14,16 +14,27 @@ export const metadata = {
 };
 
 export default async function NeonMemoryPage(props: NeonMemoryPageProps) {
-  const resolvedSearch = props.searchParams ? await props.searchParams : {};
-  const orgId = (resolvedSearch.orgId ?? DEFAULT_ORG_ID).trim();
-  const userId = resolvedSearch.userId ?? null;
+  const resolved =
+    (props.searchParams ? await props.searchParams : {}) as {
+      orgId?: string;
+      userId?: string;
+      guest?: string;
+    };
 
-  if (!userId) {
+  const orgId = (resolved.orgId ?? DEFAULT_ORG_ID).trim();
+  const isGuest = resolved.guest === "1";
+  const userId = !isGuest && resolved.userId ? resolved.userId : null;
+
+  // Not guest, but no userId → force them through the gate
+  if (!isGuest && !userId) {
     return (
       <div className="space-y-6">
         <GalaxyHeader orgName={orgId} />
         <section className="mt-2">
-          <PlayerLookupGate orgId={orgId} redirectBase="/bitgalaxy/games/neon-memory" />
+          <PlayerLookupGate
+            orgId={orgId}
+            redirectBase="/bitgalaxy/games/neon-memory"
+          />
         </section>
       </div>
     );
@@ -33,7 +44,8 @@ export default async function NeonMemoryPage(props: NeonMemoryPageProps) {
     <div className="space-y-6">
       <GalaxyHeader orgName={orgId} />
       <section>
-        <NeonMemoryGame orgId={orgId} userId={userId} />
+        {/* userId can be null in guest mode */}
+        <NeonMemoryGame orgId={orgId} userId={userId} isGuest={isGuest} />
       </section>
     </div>
   );

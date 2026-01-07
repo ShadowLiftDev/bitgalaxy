@@ -6,7 +6,8 @@ import { GameQuestShell } from "./GameQuestShell";
 
 type NeonMemoryGameProps = {
   orgId: string;
-  userId: string;
+  userId: string | null; // ✅ nullable — comes from URL lookup
+  isGuest: boolean;      // ✅ guest flag like Galaxy / Nebula
 };
 
 type Card = {
@@ -36,8 +37,8 @@ const SYMBOLS = [
 
 const LEVEL_CONFIG: Record<DifficultyLevel, { pairs: number }> = {
   1: { pairs: 8 },  // 4x4 grid (16 cards)
-  2: { pairs: 10 }, // 5 rows x 4 cols (20 cards)
-  3: { pairs: 12 }, // 6 rows x 4 cols (24 cards)
+  2: { pairs: 10 }, // 5 x 4 (20 cards)
+  3: { pairs: 12 }, // 6 x 4 (24 cards)
 };
 
 function shuffle<T>(arr: T[]): T[] {
@@ -75,7 +76,7 @@ function buildDeck(level: DifficultyLevel): Card[] {
   return shuffle(cards);
 }
 
-export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
+export function NeonMemoryGame({ orgId, userId, isGuest }: NeonMemoryGameProps) {
   const router = useRouter();
 
   const [cards, setCards] = useState<Card[]>([]);
@@ -89,9 +90,7 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
   // difficulty
   const [level, setLevel] = useState<DifficultyLevel>(1);
   const levelRef = useRef<DifficultyLevel>(1);
-  const [pairsCount, setPairsCount] = useState(
-    LEVEL_CONFIG[1].pairs,
-  );
+  const [pairsCount, setPairsCount] = useState(LEVEL_CONFIG[1].pairs);
 
   // timer
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -99,9 +98,7 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
 
   // submission state
   const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(
-    null,
-  );
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState(false);
 
   // derived
@@ -179,9 +176,7 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
 
     // flip card
     setCards((prev) =>
-      prev.map((c, i) =>
-        i === index ? { ...c, isFlipped: true } : c,
-      ),
+      prev.map((c, i) => (i === index ? { ...c, isFlipped: true } : c)),
     );
 
     if (firstIndex === null) {
@@ -203,7 +198,6 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
           ),
         );
         setMatches((m) => m + 1);
-        // clear selections without delay
         setTimeout(() => {
           setFirstIndex(null);
           setSecondIndex(null);
@@ -214,9 +208,7 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
         setTimeout(() => {
           setCards((prev) =>
             prev.map((c, i) =>
-              i === firstIndex || i === index
-                ? { ...c, isFlipped: false }
-                : c,
+              i === firstIndex || i === index ? { ...c, isFlipped: false } : c,
             ),
           );
           setFirstIndex(null);
@@ -240,28 +232,34 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
   async function handleSubmitCompletion() {
     if (!gameCompleted || submitting) return;
 
+    // ✅ Guest mode / no player: allow play but block XP
+    if (isGuest || !userId) {
+      setSubmitError(
+        "You’re playing as a guest. Link your BitGalaxy player profile to log XP and mission progress.",
+      );
+      setSubmitSuccess(false);
+      return;
+    }
+
     setSubmitting(true);
     setSubmitError(null);
 
     try {
-      const res = await fetch(
-        "/api/bitgalaxy/quests/complete-neon-memory",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            orgId,
-            userId,
-            questId: "neon-memory",
-            level: levelRef.current, // tie into 3-tier XP
-            stats: {
-              moves,
-              timeMs: Math.round(elapsedMs),
-              pairs: pairsCount,
-            },
-          }),
-        },
-      );
+      const res = await fetch("/api/bitgalaxy/quests/complete-neon-memory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orgId,
+          userId,
+          questId: "neon-memory",
+          level: levelRef.current, // tie into 3-tier XP
+          stats: {
+            moves,
+            timeMs: Math.round(elapsedMs),
+            pairs: pairsCount,
+          },
+        }),
+      });
 
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -270,11 +268,10 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
 
       setSubmitSuccess(true);
 
-      // route back to main BitGalaxy dashboard
+      // ✅ Route back to main BitGalaxy dashboard with org + userId
       setTimeout(() => {
-        router.push(
-          `/bitgalaxy?userId=${encodeURIComponent(userId)}`,
-        );
+        const params = new URLSearchParams({ orgId, userId });
+        router.push(`/bitgalaxy?${params.toString()}`);
       }, 900);
     } catch (err: any) {
       console.error("Neon Memory completion error:", err);
@@ -287,12 +284,20 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
     }
   }
 
+  const submitLabel = isGuest
+    ? "Sign in to log XP"
+    : submitting
+    ? "Syncing…"
+    : gameCompleted
+    ? "Complete mission"
+    : "Finish the grid to complete";
+
   return (
     <GameQuestShell
       title="Neon Memory"
       subtitle="Flip the neon tiles, find all the pairs, and complete the mission to earn XP."
       orgId={orgId}
-      userId={userId}
+      userId={userId ?? ""} // ✅ guests → empty string, shell treats as unlinked
     >
       {/* Top stats bar + difficulty selector */}
       <div className="flex flex-col gap-3 rounded-2xl border border-sky-500/40 bg-slate-950/95 p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -301,17 +306,13 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
             <p className="text-[10px] uppercase tracking-[0.22em] text-sky-400/80">
               Time
             </p>
-            <p className="mt-1 font-mono text-sm text-sky-100">
-              {seconds}s
-            </p>
+            <p className="mt-1 font-mono text-sm text-sky-100">{seconds}s</p>
           </div>
           <div>
             <p className="text-[10px] uppercase tracking-[0.22em] text-sky-400/80">
               Moves
             </p>
-            <p className="mt-1 font-mono text-sm text-sky-100">
-              {moves}
-            </p>
+            <p className="mt-1 font-mono text-sm text-sky-100">{moves}</p>
           </div>
           <div>
             <p className="text-[10px] uppercase tracking-[0.22em] text-sky-400/80">
@@ -378,6 +379,13 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
               </span>
             )}
 
+            {isGuest && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/60 bg-amber-500/10 px-3 py-1 text-amber-200">
+                <span className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.9)]" />
+                Guest mode — XP won’t be logged
+              </span>
+            )}
+
             <button
               type="button"
               onClick={handleReset}
@@ -419,9 +427,7 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
 
       {/* Messages */}
       {submitError && (
-        <p className="mt-3 text-[11px] text-rose-300">
-          {submitError}
-        </p>
+        <p className="mt-3 text-[11px] text-rose-300">{submitError}</p>
       )}
       {submitSuccess && (
         <p className="mt-3 text-[11px] text-emerald-300">
@@ -434,14 +440,10 @@ export function NeonMemoryGame({ orgId, userId }: NeonMemoryGameProps) {
         <button
           type="button"
           onClick={handleSubmitCompletion}
-          disabled={!gameCompleted || submitting}
+          disabled={!gameCompleted || submitting || isGuest}
           className="inline-flex items-center justify-center rounded-full bg-sky-500 px-4 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(56,189,248,0.7)] transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {submitting
-            ? "Syncing…"
-            : gameCompleted
-            ? "Complete mission"
-            : "Finish the grid to complete"}
+          {submitLabel}
         </button>
       </div>
     </GameQuestShell>

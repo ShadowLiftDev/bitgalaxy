@@ -20,12 +20,16 @@ export const metadata = {
   title: "BitGalaxy – Arcade Missions",
 };
 
-function withParams(path: string, params: Record<string, string | undefined | null>) {
+function withParams(
+  path: string,
+  params: Record<string, string | undefined | null>,
+) {
   const sp = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
     if (v != null && v !== "") sp.set(k, String(v));
   });
-  return `${path}?${sp.toString()}`;
+  const qs = sp.toString();
+  return qs ? `${path}?${qs}` : path;
 }
 
 export default async function BitGalaxyGamesPage(
@@ -62,13 +66,13 @@ export default async function BitGalaxyGamesPage(
             </p>
           </div>
 
-          {/* Player lookup form – redirects to /bitgalaxy?userId=XYZ */}
-      <PlayerLookupGate
-        orgId={orgId}
-        redirectBase="/bitgalaxy/games"
-        // optional, only if you want JOIN to go to NeonHQ landing from here too:
-        joinRedirectUrl={`https://neon-hq.vercel.app/orgs/${encodeURIComponent(orgId)}/landing`}
-      />
+          {/* Player lookup form – redirects back here with ?orgId=...&userId=... */}
+          <PlayerLookupGate
+            orgId={orgId}
+            redirectBase="/bitgalaxy/games"
+            // optional, only if you want JOIN to go to NeonHQ landing from here too:
+            joinRedirectUrl={`https://neon-hq.vercel.app/orgs/${encodeURIComponent(orgId)}/landing`}
+          />
 
           <div className="mt-2 text-[11px] text-slate-300">
             <p>
@@ -91,14 +95,41 @@ export default async function BitGalaxyGamesPage(
   let player: any = null;
   let quests: any[] = [];
 
-  if (!isGuest && userId) {
+  if (isGuest) {
+    // Guests still see real XP values from configured quests
+    quests = await getQuests(orgId, { activeOnly: true });
+  } else {
+    // Signed-in player: load both player + quests
     [player, quests] = await Promise.all([
-      getPlayer(orgId, userId),
+      getPlayer(orgId, userId as string),
       getQuests(orgId, { activeOnly: true }),
     ]);
+
+    // If the userId is present but the player doc is missing, send them back
+    // through the lookup gate (mirrors BitGalaxy home behavior).
+    if (!player) {
+      return (
+        <div className="space-y-6">
+          <GalaxyHeader orgName={orgId} />
+
+          <section className="mt-2 space-y-3">
+            <p className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-[11px] text-rose-100">
+              We couldn’t load that player ID. Please look up your profile
+              again so we can link your arcade runs to the correct account.
+            </p>
+
+            <PlayerLookupGate
+              orgId={orgId}
+              redirectBase="/bitgalaxy/games"
+              joinRedirectUrl={`https://neon-hq.vercel.app/orgs/${encodeURIComponent(orgId)}/landing`}
+            />
+          </section>
+        </div>
+      );
+    }
   }
 
-  // 🔎 Derive arcade stats from specialEvents.*
+  // 🔎 Derive arcade stats from specialEvents.* (only for signed-in players)
   const rawEvents =
     !isGuest && player ? ((player as any).specialEvents || {}) : {};
 
@@ -180,9 +211,9 @@ export default async function BitGalaxyGamesPage(
         <div className="flex flex-wrap items-center gap-2">
           <Link
             href={
-          isGuest
-            ? withParams("/bitgalaxy", { orgId })
-            : withParams("/bitgalaxy", { orgId, userId: playerUserId })
+              isGuest
+                ? withParams("/bitgalaxy", { orgId })
+                : withParams("/bitgalaxy", { orgId, userId: playerUserId })
             }
             className="inline-flex items-center gap-2 rounded-full border border-sky-500/50 bg-slate-950/80 px-3 py-1.5 text-[10px] font-semibold text-sky-100 shadow-[0_0_18px_rgba(56,189,248,0.5)] transition hover:bg-sky-500/10"
           >
@@ -262,11 +293,17 @@ export default async function BitGalaxyGamesPage(
 
             <div className="mt-4 flex justify-end">
               <Link
-            href={
-              isGuest
-                ? withParams("/bitgalaxy/games/neon-memory", { orgId, guest: "1" })
-                : withParams("/bitgalaxy/games/neon-memory", { orgId, userId: playerUserId })
-            }
+                href={
+                  isGuest
+                    ? withParams("/bitgalaxy/games/neon-memory", {
+                        orgId,
+                        guest: "1",
+                      })
+                    : withParams("/bitgalaxy/games/neon-memory", {
+                        orgId,
+                        userId: playerUserId,
+                      })
+                }
                 className="inline-flex items-center justify-center rounded-full bg-sky-500 px-4 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(56,189,248,0.7)] transition hover:bg-sky-400"
               >
                 Launch Neon Memory
@@ -351,11 +388,17 @@ export default async function BitGalaxyGamesPage(
 
             <div className="mt-4 flex justify-end">
               <Link
-            href={
-              isGuest
-                ? withParams("/bitgalaxy/games/galaxy-paddle", { orgId, guest: "1" })
-                : withParams("/bitgalaxy/games/galaxy-paddle", { orgId, userId: playerUserId })
-            }
+                href={
+                  isGuest
+                    ? withParams("/bitgalaxy/games/galaxy-paddle", {
+                        orgId,
+                        guest: "1",
+                      })
+                    : withParams("/bitgalaxy/games/galaxy-paddle", {
+                        orgId,
+                        userId: playerUserId,
+                      })
+                }
                 className="inline-flex items-center justify-center rounded-full bg-indigo-500 px-4 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(129,140,248,0.7)] transition hover:bg-indigo-400"
               >
                 Launch Galaxy Paddle
@@ -436,16 +479,22 @@ export default async function BitGalaxyGamesPage(
             </div>
 
             <div className="mt-4 flex justify-end">
-          <Link
-            href={
-              isGuest
-                ? withParams("/bitgalaxy/games/nebula-break", { orgId, guest: "1" })
-                : withParams("/bitgalaxy/games/nebula-break", { orgId, userId: playerUserId })
-            }
-            className="inline-flex items-center justify-center rounded-full bg-amber-500 px-4 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(245,158,11,0.7)] transition hover:bg-amber-400"
-          >
-            Launch Nebula Break
-          </Link>
+              <Link
+                href={
+                  isGuest
+                    ? withParams("/bitgalaxy/games/nebula-break", {
+                        orgId,
+                        guest: "1",
+                      })
+                    : withParams("/bitgalaxy/games/nebula-break", {
+                        orgId,
+                        userId: playerUserId,
+                      })
+                }
+                className="inline-flex items-center justify-center rounded-full bg-amber-500 px-4 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(245,158,11,0.7)] transition hover:bg-amber-400"
+              >
+                Launch Nebula Break
+              </Link>
             </div>
           </div>
         </article>
