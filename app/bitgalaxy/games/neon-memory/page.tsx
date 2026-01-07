@@ -1,262 +1,52 @@
-import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase-admin";
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
-import { getActiveQuests } from "@/lib/bitgalaxy/getActiveQuests";
-import { getPlayer } from "@/lib/bitgalaxy/getPlayer";
-import { getRankProgress } from "@/lib/bitgalaxy/rankEngine";
-import { ensureArcadeQuestExists } from "@/lib/bitgalaxy/ensureArcadeQuestExists";
-import { requireUser } from "@/lib/auth-server";
-import { updateXP } from "@/lib/bitgalaxy/updateXP";
-import { writeAuditLog } from "@/lib/bitgalaxy/auditLog";
-import { getISOWeekKey } from "@/lib/weekKey";
+import { GalaxyHeader } from "@/components/bitgalaxy/GalaxyHeader";
+import { PlayerLookupGate } from "@/components/bitgalaxy/PlayerLookupGate";
+import { NeonMemoryGame } from "@/components/bitgalaxy/NeonMemoryGame";
 
-export const runtime = "nodejs";
+const DEFAULT_ORG_ID =
+  process.env.NEXT_PUBLIC_DEFAULT_ORG_ID ?? "neon-lunchbox";
 
-type LevelDef = { label?: string; xp: number; description?: string };
+type NeonMemoryPageProps = {
+  searchParams?: Promise<{ orgId?: string; userId?: string; guest?: string }>;
+};
 
-function xpForLevel(
-  level: number,
-  levels?: LevelDef[] | null,
-  fallbackBase = 50,
-) {
-  // At this point we only ever call with level >= 1
-  const lvl = Math.max(1, Math.min(3, Math.floor(level)));
+export const metadata = {
+  title: "BitGalaxy – Neon Memory",
+};
 
-  if (Array.isArray(levels) && levels.length >= lvl) {
-    const v = Number(levels[lvl - 1]?.xp || 0);
-    return Math.max(0, Math.floor(v));
-  }
+export default async function NeonMemoryPage(props: NeonMemoryPageProps) {
+  const resolved =
+    (props.searchParams ? await props.searchParams : {}) as {
+      orgId?: string;
+      userId?: string;
+      guest?: string;
+    };
 
-  if (lvl === 1) return fallbackBase;
-  if (lvl === 2) return fallbackBase * 2;
-  return fallbackBase * 3;
-}
+  const orgId = (resolved.orgId ?? DEFAULT_ORG_ID).trim();
+  const isGuest = resolved.guest === "1";
+  const userId = !isGuest && resolved.userId ? resolved.userId : null;
 
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const orgId = body.orgId as string | undefined;
-    const targetUserId = body.userId as string | undefined;
-    const level = Number(body.level || 1);
-
-    const stats = body.stats as
-      | {
-          moves?: number;
-          timeMs?: number;
-        }
-      | undefined;
-
-    if (!orgId || !targetUserId) {
-      return NextResponse.json(
-        { error: "Missing orgId or userId" },
-        { status: 400 },
-      );
-    }
-
-    const acting = await requireUser(req);
-    if (acting.uid !== targetUserId) {
-      return NextResponse.json(
-        { error: "You can only submit your own Neon Memory run." },
-        { status: 403 },
-      );
-    }
-
-    const questId = "neon-memory";
-
-    await ensureArcadeQuestExists(orgId, questId, {
-      title: "Neon Memory – Arcade Mission",
-      description:
-        "Clear the neon grid with the fewest moves and shortest time you can manage.",
-      xp: 50,
-    });
-
-    const questSnap = await adminDb
-      .collection("orgs")
-      .doc(orgId)
-      .collection("bitgalaxyQuests")
-      .doc(questId)
-      .get();
-
-    const questData = (questSnap.data() || {}) as any;
-    const configuredLevels: LevelDef[] | null =
-      (questData.levels as LevelDef[] | undefined) ??
-      (questData.meta?.levels as LevelDef[] | undefined) ??
-      null;
-
-    const baseXP = Number(questData.xp || 50);
-    const weekKey = getISOWeekKey(new Date());
-
-    const playerRef = adminDb
-      .collection("orgs")
-      .doc(orgId)
-      .collection("bitgalaxyPlayers")
-      .doc(targetUserId);
-
-    const now = FieldValue.serverTimestamp() as Timestamp;
-
-    let xpAwarded = 0;
-    let newBestLevel = 0;
-
-    await adminDb.runTransaction(async (tx) => {
-      const snap = await tx.get(playerRef);
-      if (!snap.exists) {
-        throw new Error(`Player ${targetUserId} does not exist in org ${orgId}`);
-      }
-
-      const data = (snap.data() || {}) as any;
-
-      const completedQuestIds: string[] = data.completedQuestIds ?? [];
-      const specialEvents = (data.specialEvents || {}) as any;
-
-      const nm = (specialEvents.neonMemory || {}) as {
-        weekKey?: string;
-        bestLevel?: number;
-        bestTimeMs?: number | null;
-        bestMoves?: number | null;
-      };
-
-      const prevWeekKey = String(nm.weekKey || "");
-      const prevBestLevel =
-        prevWeekKey === weekKey ? Number(nm.bestLevel || 0) : 0;
-
-      const requestedLevel = Math.max(1, Math.min(3, Math.floor(level || 1)));
-
-      if (requestedLevel <= prevBestLevel) {
-        throw new Error("NEON_MEMORY_TIER_ALREADY_RECORDED");
-      }
-
-      // 🔧 FIX: treat “no previous tier” as 0 XP, not tier 1 XP
-      const prevXP =
-        prevBestLevel > 0
-          ? xpForLevel(prevBestLevel, configuredLevels, baseXP)
-          : 0;
-
-      const nextXP = xpForLevel(requestedLevel, configuredLevels, baseXP);
-
-      xpAwarded = Math.max(0, nextXP - prevXP);
-      if (xpAwarded <= 0) {
-        throw new Error("NEON_MEMORY_NO_XP_DELTA");
-      }
-
-      const moves =
-        typeof stats?.moves === "number" ? stats.moves : null;
-      const timeMs =
-        typeof stats?.timeMs === "number" ? stats.timeMs : null;
-
-      const bestMoves = nm.bestMoves ?? null;
-      const bestTimeMs = nm.bestTimeMs ?? null;
-
-      const nextBestMoves =
-        moves !== null
-          ? bestMoves === null
-            ? moves
-            : Math.min(bestMoves, moves)
-          : bestMoves;
-
-      const nextBestTimeMs =
-        timeMs !== null
-          ? bestTimeMs === null
-            ? timeMs
-            : Math.min(bestTimeMs, timeMs)
-          : bestTimeMs;
-
-      newBestLevel = requestedLevel;
-
-      const nextCompleted = completedQuestIds.includes(questId)
-        ? completedQuestIds
-        : [...completedQuestIds, questId];
-
-      tx.set(
-        playerRef,
-        {
-          completedQuestIds: nextCompleted,
-          specialEvents: {
-            ...specialEvents,
-            neonMemory: {
-              weekKey,
-              bestLevel: requestedLevel,
-              bestMoves: nextBestMoves,
-              bestTimeMs: nextBestTimeMs,
-              lastResult: {
-                level: requestedLevel,
-                moves,
-                timeMs,
-              },
-            },
-          },
-          updatedAt: now,
-        },
-        { merge: true },
-      );
-    });
-
-    await updateXP(orgId, targetUserId, xpAwarded, {
-      source: "neon_memory_tier",
-      questId,
-      meta: { weekKey, tier: newBestLevel },
-    });
-
-    await writeAuditLog(orgId, targetUserId, {
-      eventType: "arcade_tier_complete",
-      questId,
-      xpChange: xpAwarded,
-      source: "neon_memory",
-      meta: { weekKey, tier: newBestLevel, stats: stats ?? null },
-    });
-
-    const [activeQuests, player] = await Promise.all([
-      getActiveQuests(orgId, targetUserId),
-      getPlayer(orgId, targetUserId),
-    ]);
-
-    const progress = getRankProgress(player.totalXP);
-
-    return NextResponse.json({
-      success: true,
-      weekKey,
-      tier: newBestLevel,
-      xpAwarded,
-      activeQuests,
-      player: {
-        userId: player.userId,
-        orgId: player.orgId,
-        totalXP: player.totalXP,
-        rank: player.rank,
-        level: (player as any).level ?? 1,
-        weeklyXP: (player as any).weeklyXP ?? 0,
-        weeklyWeekKey: (player as any).weeklyWeekKey ?? "",
-        progress,
-      },
-    });
-  } catch (error: any) {
-    console.error("BitGalaxy complete-neon-memory error:", error);
-
-    if (error?.message === "NEON_MEMORY_TIER_ALREADY_RECORDED") {
-      return NextResponse.json(
-        {
-          error:
-            "Tier already recorded this week. Improve your run (moves/time) to earn more XP.",
-        },
-        { status: 409 },
-      );
-    }
-
-    if (error?.message === "NEON_MEMORY_NO_XP_DELTA") {
-      return NextResponse.json(
-        {
-          error:
-            "No XP change for this tier. You’ve already logged an equal or better performance.",
-        },
-        { status: 409 },
-      );
-    }
-
-    return NextResponse.json(
-      {
-        error:
-          error?.message ?? "Failed to complete Neon Memory quest",
-      },
-      { status: 500 },
+  // Not guest, but no userId → force them through the gate
+  if (!isGuest && !userId) {
+    return (
+      <div className="space-y-6">
+        <GalaxyHeader orgName={orgId} />
+        <section className="mt-2">
+          <PlayerLookupGate
+            orgId={orgId}
+            redirectBase="/bitgalaxy/games/neon-memory"
+          />
+        </section>
+      </div>
     );
   }
+
+  return (
+    <div className="space-y-6">
+      <GalaxyHeader orgName={orgId} />
+      <section>
+        {/* userId can be null in guest mode */}
+        <NeonMemoryGame orgId={orgId} userId={userId} isGuest={isGuest} />
+      </section>
+    </div>
+  );
 }
