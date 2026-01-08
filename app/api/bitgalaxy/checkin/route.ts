@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { handleCheckin } from "@/lib/bitgalaxy/checkin";
 import { getPlayer } from "@/lib/bitgalaxy/getPlayer";
 import { getRankProgress } from "@/lib/bitgalaxy/rankEngine";
-import { requireUser } from "@/lib/auth-server";
+import { requirePlayerSession } from "@/lib/bitgalaxy/playerSession";
 
 export const runtime = "nodejs";
 
@@ -16,8 +16,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing orgId" }, { status: 400 });
     }
 
-    const user = await requireUser(req);
-    const userId = user.uid;
+    const session = requirePlayerSession(req);
+
+    if (session.orgId !== orgId) {
+      return NextResponse.json(
+        { error: "Unauthorized: session does not match org" },
+        { status: 401 },
+      );
+    }
+
+    const userId = session.userId;
 
     const result = await handleCheckin(orgId, userId, code ?? null);
 
@@ -32,19 +40,26 @@ export async function POST(req: NextRequest) {
         orgId: player.orgId,
         totalXP: player.totalXP,
         rank: player.rank,
-
-        // ✅ new
         level: (player as any).level ?? 1,
         weeklyXP: (player as any).weeklyXP ?? 0,
         weeklyWeekKey: (player as any).weeklyWeekKey ?? "",
-
         progress,
       },
     });
   } catch (error: any) {
+    const msg = String(error?.message || "");
+    const status = (error as any)?.status;
+
+    if (status === 401) {
+      return NextResponse.json(
+        { error: "Unauthorized: link your BitGalaxy profile to check in." },
+        { status: 401 },
+      );
+    }
+
     console.error("BitGalaxy checkin error:", error);
     return NextResponse.json(
-      { error: error?.message ?? "Failed to process check-in" },
+      { error: msg || "Failed to process check-in" },
       { status: 500 },
     );
   }

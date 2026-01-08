@@ -1,11 +1,13 @@
 import { adminDb } from "@/lib/firebase-admin";
 import { writeAuditLog } from "./auditLog";
-import type { BitGalaxyQuest } from "./getQuests";
 import { getQuest } from "./getQuest";
 import { FieldValue } from "firebase-admin/firestore";
 
 /**
  * Marks a quest as active for the player, if not already active or completed.
+ * Protocol rules:
+ * - "arcade" quests are NOT startable (they use complete-* endpoints)
+ * - "checkin" quests are NOT startable (they use /checkin with a code)
  */
 export async function startQuest(
   orgId: string,
@@ -17,11 +19,20 @@ export async function startQuest(
   if (!questId) throw new Error("startQuest: questId is required");
 
   const quest = await getQuest(orgId, questId);
+
   if (!quest) {
     throw new Error(`startQuest: quest ${questId} not found`);
   }
   if (!quest.isActive) {
     throw new Error(`startQuest: quest ${questId} is not active`);
+  }
+
+  // ✅ Protocol gating
+  if (quest.type === "arcade") {
+    throw new Error("startQuest: arcade quests are not startable");
+  }
+  if (quest.type === "checkin") {
+    throw new Error("startQuest: checkin quests are not startable");
   }
 
   const playerRef = adminDb
@@ -42,25 +53,20 @@ export async function startQuest(
     const activeQuestIds: string[] = data.activeQuestIds ?? [];
     const completedQuestIds: string[] = data.completedQuestIds ?? [];
 
-    // If already completed and maxCompletionsPerUser is 1, block re-activation.
+    // Already active? Nothing to do.
+    if (activeQuestIds.includes(questId)) return;
+
+    // If one-time quest and already completed → block re-start
     if (
       completedQuestIds.includes(questId) &&
-      (quest.maxCompletionsPerUser === 1 ||
-        quest.maxCompletionsPerUser == null) // treat null as "infinite" but we'll still allow re-start if null
+      quest.maxCompletionsPerUser === 1
     ) {
-      if (quest.maxCompletionsPerUser === 1) {
-        throw new Error(
-          `startQuest: quest ${questId} is one-time and already completed.`,
-        );
-      }
+      throw new Error(
+        `startQuest: quest ${questId} is one-time and already completed`,
+      );
     }
 
-    // Already active? Nothing to do.
-    if (activeQuestIds.includes(questId)) {
-      return;
-    }
-
-  const now = FieldValue.serverTimestamp();
+    const now = FieldValue.serverTimestamp();
 
     tx.update(playerRef, {
       activeQuestIds: [...activeQuestIds, questId],

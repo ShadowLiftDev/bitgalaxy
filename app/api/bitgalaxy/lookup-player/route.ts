@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
+import { mintPlayerSession, PLAYER_SESSION_COOKIE } from "@/lib/bitgalaxy/playerSession";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,14 +29,22 @@ function last10(digits?: string | null) {
 
 function e164USFromDigits(digits?: string | null) {
   if (!digits) return null;
-
-  // 10 digits => assume US
   if (digits.length === 10) return `+1${digits}`;
-
-  // 11 digits starting with 1 => US with country code
   if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-
   return null;
+}
+
+function setPlayerSessionCookie(res: NextResponse, orgId: string, userId: string) {
+  res.cookies.set({
+    name: PLAYER_SESSION_COOKIE.name,
+    value: mintPlayerSession(orgId, userId),
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: PLAYER_SESSION_COOKIE.maxAgeSeconds,
+    // domain: ".yourdomain.com", // only if you want cross-subdomain app sharing
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -72,7 +81,10 @@ export async function POST(req: NextRequest) {
     if (email) {
       const snap = await playersRef.where("email", "==", email).limit(1).get();
       if (!snap.empty) {
-        return NextResponse.json({ success: true, userId: snap.docs[0].id });
+        const userId = snap.docs[0].id;
+        const res = NextResponse.json({ success: true, userId });
+        setPlayerSessionCookie(res, orgId, userId);
+        return res;
       }
     }
 
@@ -80,19 +92,12 @@ export async function POST(req: NextRequest) {
     if (phoneRaw) {
       const digitsAll = phoneDigitsAll(phoneRaw);
       const digits10 = last10(digitsAll);
-
-      // If digitsAll is 11 and starts with 1, or is 10 digits, this yields +1...
       const e164 =
         e164USFromDigits(digitsAll) || (digits10 ? `+1${digits10}` : null);
 
       const candidates: Array<string> = [
-        // Key fix: match stored "+1555..." from "555..."
         e164,
-
-        // If user typed +1555... exactly, try it too
         phoneRaw.startsWith("+") ? phoneRaw : null,
-
-        // Legacy/exact attempts
         digits10,
         phoneRaw,
       ].filter(Boolean) as string[];
@@ -100,12 +105,14 @@ export async function POST(req: NextRequest) {
       for (const value of candidates) {
         const snap = await playersRef.where("phone", "==", value).limit(1).get();
         if (!snap.empty) {
-          return NextResponse.json({ success: true, userId: snap.docs[0].id });
+          const userId = snap.docs[0].id;
+          const res = NextResponse.json({ success: true, userId });
+          setPlayerSessionCookie(res, orgId, userId);
+          return res;
         }
       }
 
-      // Optional: keep these if you *might* have mixed schemas
-      // (safe to keep; they just cost extra queries)
+      // Optional mixed-schema attempts
       const altCandidates: Array<{ field: string; value: string | null }> = [
         { field: "phoneNormalized", value: digits10 },
         { field: "phoneDigits", value: digits10 },
@@ -115,7 +122,10 @@ export async function POST(req: NextRequest) {
         if (!c.value) continue;
         const snap = await playersRef.where(c.field, "==", c.value).limit(1).get();
         if (!snap.empty) {
-          return NextResponse.json({ success: true, userId: snap.docs[0].id });
+          const userId = snap.docs[0].id;
+          const res = NextResponse.json({ success: true, userId });
+          setPlayerSessionCookie(res, orgId, userId);
+          return res;
         }
       }
     }

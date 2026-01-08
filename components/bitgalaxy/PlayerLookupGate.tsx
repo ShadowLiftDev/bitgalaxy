@@ -86,11 +86,12 @@ export function PlayerLookupGate({
 
     setLoading(true);
     try {
-      const res = await fetch("/api/bitgalaxy/lookup-player", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+    const res = await fetch("/api/bitgalaxy/lookup-player", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(payload),
+    });
 
       const json = await res.json().catch(() => ({}));
 

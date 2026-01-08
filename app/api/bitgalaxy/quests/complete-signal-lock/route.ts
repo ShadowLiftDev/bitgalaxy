@@ -2,10 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { getActiveQuests } from "@/lib/bitgalaxy/getActiveQuests";
 import { getPlayer } from "@/lib/bitgalaxy/getPlayer";
 import { getRankProgress } from "@/lib/bitgalaxy/rankEngine";
-import { requireUser } from "@/lib/auth-server";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { updateXP } from "@/lib/bitgalaxy/updateXP";
+import { requirePlayerSession } from "@/lib/bitgalaxy/playerSession";
 
 export const runtime = "nodejs";
 
@@ -22,11 +22,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const actingUser = await requireUser(req);
-    if (actingUser.uid !== targetUserId) {
+    const session = requirePlayerSession(req);
+
+    if (session.orgId !== orgId || session.userId !== targetUserId) {
       return NextResponse.json(
-        { error: "You can only complete Signal Lock for your own profile." },
-        { status: 403 },
+        { error: "Unauthorized: you can only complete Signal Lock for your own profile." },
+        { status: 401 },
       );
     }
 
@@ -88,12 +89,9 @@ export async function POST(req: NextRequest) {
         orgId: player.orgId,
         totalXP: player.totalXP,
         rank: player.rank,
-
-        // ✅ new
         level: (player as any).level ?? 1,
         weeklyXP: (player as any).weeklyXP ?? 0,
         weeklyWeekKey: (player as any).weeklyWeekKey ?? "",
-
         progress,
       },
     });
@@ -104,6 +102,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: "Signal Lock already completed for this player" },
         { status: 409 },
+      );
+    }
+
+    const status = (error as any)?.status;
+    if (status === 401) {
+      return NextResponse.json(
+        { error: "Unauthorized: link your BitGalaxy profile to complete Signal Lock." },
+        { status: 401 },
       );
     }
 
