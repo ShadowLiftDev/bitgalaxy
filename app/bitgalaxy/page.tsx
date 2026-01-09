@@ -30,10 +30,10 @@ export default async function BitGalaxyHomePage({
   const orgId = (resolved.orgId ?? DEFAULT_ORG_ID).trim();
   const userId = resolved.userId ?? null;
 
-  const userQuery =
-    userId
-      ? `?${new URLSearchParams({ orgId, userId }).toString()}`
-      : `?${new URLSearchParams({ orgId }).toString()}`;
+  // Always include orgId; include userId only when present
+  const userQuery = `?${new URLSearchParams(
+    userId ? { orgId, userId } : { orgId },
+  ).toString()}`;
 
   // 1) No user yet? Show the lookup gate instead of the HUD
   if (!userId) {
