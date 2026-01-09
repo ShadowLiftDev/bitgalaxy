@@ -19,28 +19,9 @@ export const metadata = {
   title: "BitGalaxy – Player Dashboard",
 };
 
-function buildGamePlayHref(
-  questId: string,
-  orgId: string,
-  userId?: string | null,
-): string | null {
-  const params = new URLSearchParams();
-  params.set("orgId", orgId);
-  if (userId) params.set("userId", userId);
-
-  switch (questId) {
-    case "neon-memory":
-      return `/bitgalaxy/games/neon-memory?${params.toString()}`;
-    case "galaxy-paddle":
-      return `/bitgalaxy/games/galaxy-paddle?${params.toString()}`;
-    case "nebula-break":
-      return `/bitgalaxy/games/nebula-break?${params.toString()}`;
-    default:
-      return null;
-  }
-}
-
-export default async function BitGalaxyHomePage({ searchParams }: BitGalaxyHomePageProps) {
+export default async function BitGalaxyHomePage({
+  searchParams,
+}: BitGalaxyHomePageProps) {
   const resolved = (searchParams ? await searchParams : {}) as {
     orgId?: string;
     userId?: string;
@@ -52,7 +33,7 @@ export default async function BitGalaxyHomePage({ searchParams }: BitGalaxyHomeP
   const userQuery =
     userId
       ? `?${new URLSearchParams({ orgId, userId }).toString()}`
-      : "";
+      : `?${new URLSearchParams({ orgId }).toString()}`;
 
   // 1) No user yet? Show the lookup gate instead of the HUD
   if (!userId) {
@@ -63,7 +44,9 @@ export default async function BitGalaxyHomePage({ searchParams }: BitGalaxyHomeP
         <section className="mt-2">
           <PlayerLookupGate
             orgId={orgId}
-            joinRedirectUrl={`https://neon-hq.vercel.app/orgs/${encodeURIComponent(orgId)}/landing`}
+            joinRedirectUrl={`https://neon-hq.vercel.app/orgs/${encodeURIComponent(
+              orgId,
+            )}/landing`}
           />
         </section>
 
@@ -82,30 +65,34 @@ export default async function BitGalaxyHomePage({ searchParams }: BitGalaxyHomeP
   }
 
   // 2) We have a player: load player + quests
-const [player, quests] = await Promise.all([
-  getPlayer(orgId, userId),
-  getQuests(orgId, { activeOnly: true }),
-]);
+  const [player, quests] = await Promise.all([
+    getPlayer(orgId, userId),
+    getQuests(orgId, { activeOnly: true }),
+  ]);
 
-if (!player) {
-  return (
-    <div className="space-y-6">
-      <GalaxyHeader orgName={orgId} />
-      <section className="mt-2">
-        <PlayerLookupGate
-          orgId={orgId}
-          joinRedirectUrl={`https://neon-hq.vercel.app/orgs/${encodeURIComponent(orgId)}/landing`}
-        />
-      </section>
-      <p className="text-center text-[11px] text-rose-300">
-        We couldn’t load that player ID. Please look up your profile again.
-      </p>
-    </div>
-  );
-}
+  if (!player) {
+    return (
+      <div className="space-y-6">
+        <GalaxyHeader orgName={orgId} />
+        <section className="mt-2">
+          <PlayerLookupGate
+            orgId={orgId}
+            joinRedirectUrl={`https://neon-hq.vercel.app/orgs/${encodeURIComponent(
+              orgId,
+            )}/landing`}
+          />
+        </section>
+        <p className="text-center text-[11px] text-rose-300">
+          We couldn’t load that player ID. Please look up your profile again.
+        </p>
+      </div>
+    );
+  }
 
   const totalXP =
-    typeof (player as any)?.totalXP === "number" ? (player as any).totalXP : 0;
+    typeof (player as any)?.totalXP === "number"
+      ? (player as any).totalXP
+      : 0;
 
   const progress = getRankProgress(totalXP);
   const activeCount = player.activeQuestIds?.length ?? 0;
@@ -130,6 +117,11 @@ if (!player) {
   const questsForDisplay = hasSignalLock
     ? quests.filter((q) => q.id !== "signal-lock")
     : quests;
+
+  // 🚫 Filter out arcade quests everywhere on this dashboard
+  const nonArcadeQuestsForDisplay = questsForDisplay.filter(
+    (q: any) => q.type !== "arcade",
+  );
 
   return (
     <div className="space-y-6">
@@ -323,37 +315,31 @@ if (!player) {
                   />
                 </div>
 
-      {/* ⭐ Arcade / View Games button (centered) */}
-      <div className="mt-3 flex justify-center">
-        <Link
-          href={`/bitgalaxy/games${userQuery}`}
-          className="inline-flex items-center gap-2 rounded-full bg-sky-500 px-5 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(56,189,248,0.7)] transition hover:bg-sky-400"
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.9)]" />
-          Open Arcade / View Games
-        </Link>
-      </div>
+                {/* ⭐ Arcade / View Games button (centered) */}
+                <div className="mt-3 flex justify-center">
+                  <Link
+                    href={`/bitgalaxy/games${userQuery}`}
+                    className="inline-flex items-center gap-2 rounded-full bg-sky-500 px-5 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(56,189,248,0.7)] transition hover:bg-sky-400"
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.9)]" />
+                    Open Arcade / View Games
+                  </Link>
+                </div>
 
-      {/* and ALL other links already using userQuery now include orgId too */}
-      {/* QuestCard map remains the same */}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {questsForDisplay.map((quest) => {
-          const isArcade = quest.type === "arcade";
-          const playHref = isArcade
-            ? buildGamePlayHref(quest.id, orgId, userId)
-            : null;
-
-          return (
-            <QuestCard
-              key={quest.id}
-              quest={quest}
-              orgId={orgId}
-              userId={userId}
-              playHref={playHref}
-            />
-          );
-        })}
-      </div>
+                {/* Optional mini quest grid in HUD – non-arcade only */}
+                {nonArcadeQuestsForDisplay.length > 0 && (
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    {nonArcadeQuestsForDisplay.map((quest) => (
+                      <QuestCard
+                        key={quest.id}
+                        quest={quest}
+                        orgId={orgId}
+                        userId={userId}
+                        playHref={null}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -484,39 +470,30 @@ if (!player) {
                 Tonight&apos;s available quests
               </h2>
               <span className="rounded-full border border-sky-500/60 bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-100">
-                {questsForDisplay.length} contract
-                {questsForDisplay.length === 1 ? "" : "s"} online
+                {nonArcadeQuestsForDisplay.length} contract
+                {nonArcadeQuestsForDisplay.length === 1 ? "" : "s"} online
               </span>
             </div>
 
-            {questsForDisplay.length === 0 ? (
+            {nonArcadeQuestsForDisplay.length === 0 ? (
               <p className="rounded-xl border border-sky-500/40 bg-slate-950/95 px-4 py-3 text-xs text-sky-100/85">
                 No quests available yet. Once an owner configures missions for
                 this world in NeonHQ &gt; BitGalaxy, they&apos;ll appear here
                 as contracts you can accept.
               </p>
             ) : (
-
-  <div className="grid gap-3 sm:grid-cols-2">
-    {questsForDisplay.map((quest) => {
-      const isArcade = quest.type === "arcade";
-
-      const playHref = isArcade
-        ? buildGamePlayHref(quest.id, orgId, userId)
-        : null;
-
-      return (
-        <QuestCard
-          key={quest.id}
-          quest={quest}
-          orgId={orgId}
-          userId={userId}
-          playHref={playHref}
-        />
-      );
-    })}
-  </div>
-)}
+              <div className="grid gap-3 sm:grid-cols-2">
+                {nonArcadeQuestsForDisplay.map((quest) => (
+                  <QuestCard
+                    key={quest.id}
+                    quest={quest}
+                    orgId={orgId}
+                    userId={userId}
+                    playHref={null}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -528,9 +505,8 @@ if (!player) {
             </h3>
             <p className="mt-1">
               Every check-in, quest, and reward funnels XP into the BitGalaxy
-              core. This console shows your{" "}
-              <strong>personal leaderboard</strong> for this world — rank,
-              trajectory, and active missions.
+              core. This console shows your <strong>personal leaderboard</strong>{" "}
+              for this world — rank, trajectory, and active missions.
             </p>
             <p className="mt-2 text-slate-400">
               When we bring the Global Arcade online, this same ID will let you
