@@ -184,6 +184,11 @@ if (!player) {
     }),
   );
 
+    // ✅ Arcade-only list (for the mini HUD grid)
+  const arcadeQuestsForDisplay = questsWithPlayerState.filter(
+    (q: any) => q.type === "arcade",
+  );
+
   // 🚫 Filter out arcade quests on this page
   const nonArcadeQuestsForDisplay = questsWithPlayerState.filter(
     (q: any) => q.type !== "arcade",
@@ -393,17 +398,22 @@ if (!player) {
                 </div>
 
                 {/* Optional mini quest grid in HUD – non-arcade only */}
-                {nonArcadeQuestsForDisplay.length > 0 && (
+                {arcadeQuestsForDisplay.length > 0 && (
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    {nonArcadeQuestsForDisplay.map((quest) => (
-                      <QuestCard
-                        key={quest.id}
-                        quest={quest}
-                        orgId={orgId}
-                        userId={userId}
-                        playHref={null}
-                      />
-                    ))}
+                    {arcadeQuestsForDisplay.map((quest: any) => {
+                      const playHref = buildGamePlayHref(quest.id, orgId, userId);
+                      if (!playHref) return null; // skip if we don’t know this game id
+
+                      return (
+                        <QuestCard
+                          key={quest.id}
+                          quest={quest}
+                          orgId={orgId}
+                          userId={userId}
+                          playHref={playHref}
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </div>
