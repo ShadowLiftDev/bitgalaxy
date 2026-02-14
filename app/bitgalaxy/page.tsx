@@ -108,17 +108,6 @@ export default async function BitGalaxyHomePage({ searchParams }: BitGalaxyHomeP
             joinRedirectUrl={`https://neon-hq.vercel.app/orgs/${encodeURIComponent(orgId)}/landing`}
           />
         </section>
-
-        <p className="mt-6 text-center text-[11px] text-slate-500">
-          Are you the owner of this world?{" "}
-          <a
-            href={`/hq/${encodeURIComponent(orgId)}/bitgalaxy`}
-            className="text-emerald-400 underline underline-offset-2 hover:text-emerald-300"
-          >
-            Open the BitGalaxy console in NeonHQ
-          </a>
-          .
-        </p>
       </div>
     );
   }
