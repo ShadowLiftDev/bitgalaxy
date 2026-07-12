@@ -4,9 +4,10 @@ import type { BitGalaxyQuest } from "@/lib/bitgalaxy/getQuests";
 type ActiveQuestCardProps = {
   quest: BitGalaxyQuest;
   orgId: string;
+  memberId: string;
 };
 
-export function ActiveQuestCard({ quest, orgId }: ActiveQuestCardProps) {
+export function ActiveQuestCard({ quest, orgId, memberId }: ActiveQuestCardProps) {
   const questUrl = `/bitgalaxy/quests/${quest.id}?orgId=${encodeURIComponent(
     orgId,
   )}`;
