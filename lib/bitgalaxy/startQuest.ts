@@ -1,82 +1,301 @@
-import { adminDb } from "@/lib/firebase-admin";
-import { writeAuditLog } from "./auditLog";
-import { getQuest } from "./getQuest";
 import { FieldValue } from "firebase-admin/firestore";
 
+import { adminDb } from "@/lib/firebase-admin";
+
+import { getQuest } from "./getQuest";
+
 /**
- * Marks a quest as active for the player, if not already active or completed.
- * Protocol rules:
- * - "arcade" quests are NOT startable (they use complete-* endpoints)
- * - "checkin" quests are NOT startable (they use /checkin with a code)
+ * Marks a normal BitGalaxy quest as active for a member.
+ *
+ * Arcade quests are launched through their game pages.
+ * Check-in quests are handled through the check-in endpoint.
+ *
+ * Live state:
+ * members/{memberId}/orgLinks/{orgId}/modules/bitgalaxy/state/current
+ *
+ * History:
+ * activities/{activityId}
  */
 export async function startQuest(
   orgId: string,
-  userId: string,
+  memberId: string,
   questId: string,
 ): Promise<void> {
-  if (!orgId) throw new Error("startQuest: orgId is required");
-  if (!userId) throw new Error("startQuest: userId is required");
-  if (!questId) throw new Error("startQuest: questId is required");
+  const normalizedOrgId = normalizeRequiredId(
+    orgId,
+    "orgId",
+  );
 
-  const quest = await getQuest(orgId, questId);
+  const normalizedMemberId = normalizeRequiredId(
+    memberId,
+    "memberId",
+  );
+
+  const normalizedQuestId = normalizeRequiredId(
+    questId,
+    "questId",
+  );
+
+  const quest = await getQuest(
+    normalizedOrgId,
+    normalizedQuestId,
+  );
 
   if (!quest) {
-    throw new Error(`startQuest: quest ${questId} not found`);
+    throw new Error(
+      `startQuest: quest ${normalizedQuestId} not found`,
+    );
   }
+
   if (!quest.isActive) {
-    throw new Error(`startQuest: quest ${questId} is not active`);
+    throw new Error(
+      `startQuest: quest ${normalizedQuestId} is not active`,
+    );
   }
 
-  // ✅ Protocol gating
   if (quest.type === "arcade") {
-    throw new Error("startQuest: arcade quests are not startable");
+    throw new Error(
+      "startQuest: arcade quests are started through their game page",
+    );
   }
+
   if (quest.type === "checkin") {
-    throw new Error("startQuest: checkin quests are not startable");
+    throw new Error(
+      "startQuest: check-in quests are completed through the check-in endpoint",
+    );
   }
 
-  const playerRef = adminDb
-    .collection("orgs")
-    .doc(orgId)
-    .collection("bitgalaxyPlayers")
-    .doc(userId);
+  const memberRef = adminDb
+    .collection("members")
+    .doc(normalizedMemberId);
 
-  await adminDb.runTransaction(async (tx) => {
-    const snap = await tx.get(playerRef);
-    if (!snap.exists) {
+  const orgLinkRef = memberRef
+    .collection("orgLinks")
+    .doc(normalizedOrgId);
+
+  const stateRef = orgLinkRef
+    .collection("modules")
+    .doc("bitgalaxy")
+    .collection("state")
+    .doc("current");
+
+  const activityRef = adminDb
+    .collection("activities")
+    .doc();
+
+  await adminDb.runTransaction(async (transaction) => {
+    const [
+      memberSnapshot,
+      orgLinkSnapshot,
+      stateSnapshot,
+    ] = await Promise.all([
+      transaction.get(memberRef),
+      transaction.get(orgLinkRef),
+      transaction.get(stateRef),
+    ]);
+
+    if (!memberSnapshot.exists) {
       throw new Error(
-        `startQuest: player ${userId} does not exist in org ${orgId}`,
+        `startQuest: member ${normalizedMemberId} does not exist`,
       );
     }
 
-    const data = snap.data() as any;
-    const activeQuestIds: string[] = data.activeQuestIds ?? [];
-    const completedQuestIds: string[] = data.completedQuestIds ?? [];
+    if (!orgLinkSnapshot.exists) {
+      throw new Error(
+        `startQuest: member ${normalizedMemberId} is not connected to org ${normalizedOrgId}`,
+      );
+    }
 
-    // Already active? Nothing to do.
-    if (activeQuestIds.includes(questId)) return;
+    const stateData =
+      stateSnapshot.data() ?? {};
 
-    // If one-time quest and already completed → block re-start
+    const activeQuestIds = normalizeStringArray(
+      stateData.activeQuestIds,
+    );
+
+    const completedQuestIds =
+      normalizeStringArray(
+        stateData.completedQuestIds,
+      );
+
+    const completionCounts =
+      normalizeCompletionCounts(
+        stateData.questCompletionCounts,
+      );
+
     if (
-      completedQuestIds.includes(questId) &&
-      quest.maxCompletionsPerUser === 1
+      activeQuestIds.includes(
+        normalizedQuestId,
+      )
+    ) {
+      return;
+    }
+
+    const completionCount =
+      completionCounts[normalizedQuestId] ?? 0;
+
+    const completionLimit =
+      normalizeCompletionLimit(
+        quest.maxCompletionsPerUser,
+      );
+
+    if (
+      completionLimit !== null &&
+      completionCount >= completionLimit
     ) {
       throw new Error(
-        `startQuest: quest ${questId} is one-time and already completed`,
+        `startQuest: quest ${normalizedQuestId} has reached its completion limit`,
       );
     }
 
     const now = FieldValue.serverTimestamp();
 
-    tx.update(playerRef, {
-      activeQuestIds: [...activeQuestIds, questId],
-      updatedAt: now,
+    transaction.set(
+      stateRef,
+      {
+        moduleId: "bitgalaxy",
+        orgId: normalizedOrgId,
+        memberId: normalizedMemberId,
+
+        activeQuestIds: [
+          ...activeQuestIds,
+          normalizedQuestId,
+        ],
+
+        completedQuestIds,
+        questCompletionCounts:
+          completionCounts,
+
+        updatedAt: now,
+
+        ...(stateSnapshot.exists
+          ? {}
+          : {
+              totalXP: 0,
+              level: 1,
+              rank: "Rookie",
+              weeklyXP: 0,
+              weeklyWeekKey: "",
+              createdAt: now,
+            }),
+      },
+      {
+        merge: true,
+      },
+    );
+
+    transaction.set(activityRef, {
+      activityId: activityRef.id,
+
+      system: "bitgalaxy",
+      moduleId: "bitgalaxy",
+
+      orgId: normalizedOrgId,
+      memberId: normalizedMemberId,
+
+      eventType: "quest_start",
+      xpChange: null,
+
+      questId: normalizedQuestId,
+      rewardId: null,
+      gameId: null,
+
+      source: "manual",
+      meta: {
+        questType: quest.type,
+      },
+
+      occurredAt: now,
+      createdAt: now,
     });
   });
+}
 
-  await writeAuditLog(orgId, userId, {
-    eventType: "quest_start",
-    questId,
-    source: "manual",
-  });
+function normalizeRequiredId(
+  value: string,
+  fieldName: string,
+): string {
+  const normalized = value.trim();
+
+  if (!normalized) {
+    throw new Error(
+      `startQuest: ${fieldName} is required`,
+    );
+  }
+
+  return normalized;
+}
+
+function normalizeStringArray(
+  value: unknown,
+): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      value
+        .filter(
+          (item): item is string =>
+            typeof item === "string",
+        )
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function normalizeCompletionCounts(
+  value: unknown,
+): Record<string, number> {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return {};
+  }
+
+  const normalized: Record<string, number> =
+    {};
+
+  for (const [key, count] of Object.entries(
+    value,
+  )) {
+    const parsed = Number(count);
+
+    if (
+      key.trim() &&
+      Number.isFinite(parsed) &&
+      parsed >= 0
+    ) {
+      normalized[key] = Math.floor(parsed);
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeCompletionLimit(
+  value: unknown,
+): number | null {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return null;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  const normalized = Math.floor(parsed);
+
+  return normalized > 0
+    ? normalized
+    : null;
 }

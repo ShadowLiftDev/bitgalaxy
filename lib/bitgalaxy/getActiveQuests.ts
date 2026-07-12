@@ -1,52 +1,92 @@
 import { adminDb } from "@/lib/firebase-admin";
+
+import { getQuest } from "./getQuest";
 import type { BitGalaxyQuest } from "./getQuests";
-import { FieldPath } from "firebase-admin/firestore";
 
 export async function getActiveQuests(
   orgId: string,
-  userId: string,
+  memberId: string,
 ): Promise<BitGalaxyQuest[]> {
-  if (!orgId) throw new Error("getActiveQuests: orgId is required");
-  if (!userId) throw new Error("getActiveQuests: userId is required");
+  const normalizedOrgId = normalizeRequiredId(
+    orgId,
+    "orgId",
+  );
 
-  const playerRef = adminDb
-    .collection("orgs")
-    .doc(orgId)
-    .collection("bitgalaxyPlayers")
-    .doc(userId);
+  const normalizedMemberId = normalizeRequiredId(
+    memberId,
+    "memberId",
+  );
 
-  const playerSnap = await playerRef.get();
-  if (!playerSnap.exists) {
+  const stateRef = adminDb
+    .collection("members")
+    .doc(normalizedMemberId)
+    .collection("orgLinks")
+    .doc(normalizedOrgId)
+    .collection("modules")
+    .doc("bitgalaxy")
+    .collection("state")
+    .doc("current");
+
+  const stateSnapshot = await stateRef.get();
+
+  if (!stateSnapshot.exists) {
     return [];
   }
 
-  const playerData = playerSnap.data() as any;
-  const activeIds: string[] = playerData.activeQuestIds ?? [];
+  const stateData = stateSnapshot.data() ?? {};
 
-  if (!activeIds.length) return [];
+  const activeQuestIds = normalizeStringArray(
+    stateData.activeQuestIds,
+  );
 
-  const questsCol = adminDb
-    .collection("orgs")
-    .doc(orgId)
-    .collection("bitgalaxyQuests");
-
-  const chunks: string[][] = [];
-  for (let i = 0; i < activeIds.length; i += 10) {
-    chunks.push(activeIds.slice(i, i + 10));
+  if (activeQuestIds.length === 0) {
+    return [];
   }
 
-  const results: BitGalaxyQuest[] = [];
+  const questResults = await Promise.all(
+    activeQuestIds.map((questId) =>
+      getQuest(normalizedOrgId, questId),
+    ),
+  );
 
-  for (const chunk of chunks) {
-    const snap = await questsCol
-      .where(FieldPath.documentId(), "in", chunk)
-      .get();
+  return questResults.filter(
+    (quest): quest is BitGalaxyQuest =>
+      quest !== null &&
+      quest.isActive === true,
+  );
+}
 
-    snap.forEach((doc) => {
-      const data = doc.data() as Omit<BitGalaxyQuest, "id">;
-      results.push({ id: doc.id, ...data });
-    });
+function normalizeRequiredId(
+  value: string,
+  fieldName: string,
+): string {
+  const normalized = value.trim();
+
+  if (!normalized) {
+    throw new Error(
+      `getActiveQuests: ${fieldName} is required`,
+    );
   }
 
-  return results;
+  return normalized;
+}
+
+function normalizeStringArray(
+  value: unknown,
+): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      value
+        .filter(
+          (item): item is string =>
+            typeof item === "string",
+        )
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
 }

@@ -1,318 +1,1036 @@
+import { FieldValue } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
+
 import { adminDb } from "@/lib/firebase-admin";
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { getISOWeekKey } from "@/lib/weekKey";
 import { getActiveQuests } from "@/lib/bitgalaxy/getActiveQuests";
 import { getPlayer } from "@/lib/bitgalaxy/getPlayer";
-import { getRankProgress } from "@/lib/bitgalaxy/rankEngine";
-import { ensureArcadeQuestExists } from "@/lib/bitgalaxy/ensureArcadeQuestExists";
-// ❌ no requireUser here – not Firebase-locked
-import { updateXP } from "@/lib/bitgalaxy/updateXP";
-import { writeAuditLog } from "@/lib/bitgalaxy/auditLog";
-import { getISOWeekKey } from "@/lib/weekKey";
+import { getQuest } from "@/lib/bitgalaxy/getQuest";
+import { getWorld } from "@/lib/bitgalaxy/getWorld";
+import {
+  getLevelForXP,
+  getRankForXP,
+  getRankProgress,
+} from "@/lib/bitgalaxy/rankEngine";
+import { requirePlayerSession } from "@/lib/bitgalaxy/playerSession";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-type LevelDef = { label?: string; xp: number; description?: string };
+const GAME_ID = "galaxy-paddle";
+const MODULE_ID = "bitgalaxy";
 
-type GalaxyPaddleStats = {
-  hits?: number;
-  timeMs?: number;
-  maxSpeed?: number;
+type DifficultyLevel = 1 | 2 | 3;
+
+type GalaxyPaddleRequestBody = {
+  orgId?: unknown;
+  memberId?: unknown;
+  level?: unknown;
+  stats?: {
+    hits?: unknown;
+    timeMs?: unknown;
+    maxSpeed?: unknown;
+  };
 };
 
-function xpForLevel(
-  level: number,
-  levels?: LevelDef[] | null,
-  fallbackBase = 50,
-) {
-  const lvl = Math.max(1, Math.min(3, Math.floor(level || 1)));
+type LevelDefinition = {
+  level: DifficultyLevel;
+  xp: number;
+};
 
-  if (Array.isArray(levels) && levels.length >= lvl) {
-    const v = Number(levels[lvl - 1]?.xp || 0);
-    return Math.max(0, Math.floor(v));
-  }
+type StoredGalaxyPaddleGame = {
+  completed?: unknown;
 
-  if (lvl === 1) return fallbackBase;
-  if (lvl === 2) return fallbackBase * 2;
-  return fallbackBase * 3;
-}
+  weeklyWeekKey?: unknown;
+  weeklyBestLevel?: unknown;
 
-/**
- * Server-side tier computation based on stats.
- * Mirrors the client thresholds:
- *  - Tier 1: sec >= 10 OR hits >= 5
- *  - Tier 2: sec >= 25 OR hits >= 15
- *  - Tier 3: sec >= 45 OR hits >= 30
- */
-function computeGalaxyPaddleTierFromStats(
-  stats?: GalaxyPaddleStats,
-): 1 | 2 | 3 {
-  if (!stats) return 1;
+  bestLevel?: unknown;
+  bestHits?: unknown;
+  bestTimeMs?: unknown;
+  bestMaxSpeed?: unknown;
+};
 
-  const hits = typeof stats.hits === "number" ? stats.hits : 0;
-  const timeMs = typeof stats.timeMs === "number" ? stats.timeMs : 0;
-  const sec = timeMs / 1000;
+const FALLBACK_LEVELS: LevelDefinition[] = [
+  {
+    level: 1,
+    xp: 50,
+  },
+  {
+    level: 2,
+    xp: 100,
+  },
+  {
+    level: 3,
+    xp: 150,
+  },
+];
 
-  const t1 = sec >= 10 || hits >= 5;
-  const t2 = sec >= 25 || hits >= 15;
-  const t3 = sec >= 45 || hits >= 30;
-
-  if (t3) return 3;
-  if (t2) return 2;
-  if (t1) return 1;
-  return 1;
-}
-
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
   try {
-    const body = await req.json();
+    const body = (await request.json().catch(() => null)) as
+      | GalaxyPaddleRequestBody
+      | null;
 
-    const orgId = body.orgId as string | undefined;
-    const targetUserId = body.userId as string | undefined;
-    const rawLevel = Number(body.level || 1);
-    const stats = body.stats as GalaxyPaddleStats | undefined;
-
-    if (!orgId || !targetUserId) {
+    if (!body) {
       return NextResponse.json(
-        { error: "Missing orgId or userId" },
+        {
+          success: false,
+          error: "A valid JSON request body is required.",
+        },
         { status: 400 },
       );
     }
 
-    const questId = "galaxy-paddle";
+    const orgId = normalizeRequiredString(body.orgId);
 
-    // Ensure the arcade quest doc exists with a base XP value
-    await ensureArcadeQuestExists(orgId, questId, {
-      title: "Galaxy Paddle – Arcade Mission",
-      description:
-        "Hold the defensive line and keep the core in play to log your first completion.",
-      xp: 50,
-    });
+    if (!orgId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Missing orgId.",
+        },
+        { status: 400 },
+      );
+    }
 
-    const questSnap = await adminDb
-      .collection("orgs")
-      .doc(orgId)
-      .collection("bitgalaxyQuests")
-      .doc(questId)
-      .get();
+    const session = requirePlayerSession(request);
 
-    const questData = (questSnap.data() || {}) as any;
-    const configuredLevels: LevelDef[] | null =
-      (questData.levels as LevelDef[] | undefined) ??
-      (questData.meta?.levels as LevelDef[] | undefined) ??
-      null;
+    if (!session?.memberId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "A connected BitGalaxy member session is required.",
+        },
+        { status: 401 },
+      );
+    }
 
-    const baseXP = Number(questData.xp || 50);
-    const weekKey = getISOWeekKey(new Date());
+    if (session.orgId !== orgId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Session organization does not match the requested organization.",
+        },
+        { status: 403 },
+      );
+    }
 
-    const playerRef = adminDb
-      .collection("orgs")
-      .doc(orgId)
-      .collection("bitgalaxyPlayers")
-      .doc(targetUserId);
+    const requestedMemberId = normalizeOptionalString(body.memberId);
 
-    const now = FieldValue.serverTimestamp() as Timestamp;
+    if (
+      requestedMemberId &&
+      requestedMemberId !== session.memberId
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Session member does not match the requested member.",
+        },
+        { status: 403 },
+      );
+    }
 
-    let xpAwarded = 0;
-    let newBestLevel = 0;
+    const memberId = session.memberId;
 
-    // Clamp the requested level between 1 and 3
-    const requestedLevel = Math.max(
-      1,
-      Math.min(3, Math.floor(rawLevel || 1)),
+    const requestedLevel = normalizeLevel(body.level);
+
+    if (!requestedLevel) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "level must be an integer from 1 through 3.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const hits = normalizeNonNegativeInteger(body.stats?.hits);
+    const timeMs = normalizePositiveInteger(body.stats?.timeMs);
+    const maxSpeed = normalizeNonNegativeNumber(
+      body.stats?.maxSpeed,
     );
 
-    // If we have stats, compute the max tier they justify
-    // and clamp the effective level to that.
-    let effectiveLevel = requestedLevel;
-    const hasStats =
-      stats &&
-      (typeof stats.hits === "number" || typeof stats.timeMs === "number");
-    if (hasStats) {
-      const maxTierFromStats = computeGalaxyPaddleTierFromStats(stats);
-      effectiveLevel = Math.min(requestedLevel, maxTierFromStats);
+    if (
+      hits === null ||
+      timeMs === null ||
+      maxSpeed === null
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "hits, timeMs, and maxSpeed must contain valid numeric values.",
+        },
+        { status: 400 },
+      );
     }
 
-    await adminDb.runTransaction(async (tx) => {
-      const snap = await tx.get(playerRef);
-      if (!snap.exists) {
-        // This will be mapped to a 404 below.
-        throw new Error(
-          `PLAYER_NOT_FOUND::Player ${targetUserId} does not exist in org ${orgId}`,
-        );
-      }
-
-      const data = (snap.data() || {}) as any;
-      const completedQuestIds: string[] = data.completedQuestIds ?? [];
-
-      const specialEvents = (data.specialEvents || {}) as any;
-      const gp = (specialEvents.galaxyPaddle || {}) as {
-        weekKey?: string;
-        bestLevel?: number;
-        bestHits?: number | null;
-        bestTimeMs?: number | null;
-        bestMaxSpeed?: number | null;
-      };
-
-      const prevWeekKey = String(gp.weekKey || "");
-      const prevBestLevel =
-        prevWeekKey === weekKey ? Number(gp.bestLevel || 0) : 0;
-
-      // Effective level after server-side clamping
-      const finalLevel = Math.max(
-        1,
-        Math.min(3, Math.floor(effectiveLevel || 1)),
-      );
-
-      // Prevent re-logging equal or worse tiers in this week
-      if (finalLevel <= prevBestLevel) {
-        throw new Error("GALAXY_PADDLE_TIER_ALREADY_RECORDED");
-      }
-
-      const prevXP = xpForLevel(prevBestLevel, configuredLevels, baseXP);
-      const nextXP = xpForLevel(finalLevel, configuredLevels, baseXP);
-
-      xpAwarded = Math.max(0, nextXP - prevXP);
-      if (xpAwarded <= 0) {
-        throw new Error("GALAXY_PADDLE_NO_XP_DELTA");
-      }
-
-      const hits =
-        typeof stats?.hits === "number" ? stats.hits : null;
-      const timeMs =
-        typeof stats?.timeMs === "number" ? stats.timeMs : null;
-      const maxSpeed =
-        typeof stats?.maxSpeed === "number" ? stats.maxSpeed : null;
-
-      const bestHits = gp.bestHits ?? null;
-      const bestTimeMs = gp.bestTimeMs ?? null;
-      const bestMaxSpeed = gp.bestMaxSpeed ?? null;
-
-      const nextBestHits =
-        hits !== null
-          ? bestHits === null
-            ? hits
-            : Math.max(bestHits, hits)
-          : bestHits;
-
-      const nextBestTimeMs =
-        timeMs !== null
-          ? bestTimeMs === null
-            ? timeMs
-            : Math.max(bestTimeMs, timeMs)
-          : bestTimeMs;
-
-      const nextBestMaxSpeed =
-        maxSpeed !== null
-          ? bestMaxSpeed === null
-            ? maxSpeed
-            : Math.max(bestMaxSpeed, maxSpeed)
-          : bestMaxSpeed;
-
-      newBestLevel = finalLevel;
-
-      const nextCompleted = completedQuestIds.includes(questId)
-        ? completedQuestIds
-        : [...completedQuestIds, questId];
-
-      tx.set(
-        playerRef,
+    /*
+     * These are broad sanity limits, not full anti-cheat protection.
+     */
+    if (
+      hits > 100_000 ||
+      timeMs > 3_600_000 ||
+      maxSpeed > 100_000
+    ) {
+      return NextResponse.json(
         {
-          completedQuestIds: nextCompleted,
-          specialEvents: {
-            ...specialEvents,
-            galaxyPaddle: {
-              weekKey,
-              bestLevel: finalLevel,
-              bestHits: nextBestHits,
-              bestTimeMs: nextBestTimeMs,
-              bestMaxSpeed: nextBestMaxSpeed,
-              lastResult: { level: finalLevel, hits, timeMs, maxSpeed },
-            },
-          },
-          updatedAt: now,
+          success: false,
+          error:
+            "Submitted Galaxy Paddle statistics are outside the accepted range.",
         },
-        { merge: true },
+        { status: 400 },
       );
-    });
+    }
 
-    // Apply XP and write audit log only after successful transaction
-    await updateXP(orgId, targetUserId, xpAwarded, {
-      source: "galaxy_paddle_tier",
-      questId,
-      meta: { weekKey, tier: newBestLevel },
-    });
+    const justifiedLevel =
+      computeGalaxyPaddleTierFromStats({
+        hits,
+        timeMs,
+      });
 
-    await writeAuditLog(orgId, targetUserId, {
-      eventType: "arcade_tier_complete",
-      questId,
-      xpChange: xpAwarded,
-      source: "galaxy_paddle",
-      meta: { weekKey, tier: newBestLevel, stats: stats ?? null },
-    });
+    const finalLevel = Math.min(
+      requestedLevel,
+      justifiedLevel,
+    ) as DifficultyLevel;
 
-    const [activeQuests, player] = await Promise.all([
-      getActiveQuests(orgId, targetUserId),
-      getPlayer(orgId, targetUserId),
+    const [world, quest] = await Promise.all([
+      getWorld(orgId),
+      getQuest(orgId, GAME_ID),
     ]);
 
-    const progress = getRankProgress(player.totalXP);
-
-    return NextResponse.json({
-      success: true,
-      weekKey,
-      tier: newBestLevel,
-      xpAwarded,
-      activeQuests,
-      player: {
-        userId: player.userId,
-        orgId: player.orgId,
-        totalXP: player.totalXP,
-        rank: player.rank,
-        level: (player as any).level ?? 1,
-        weeklyXP: (player as any).weeklyXP ?? 0,
-        weeklyWeekKey: (player as any).weeklyWeekKey ?? "",
-        progress,
-      },
-    });
-  } catch (error: any) {
-    console.error("BitGalaxy complete-galaxy-paddle error:", error);
-
-    const msg = String(error?.message || "");
-
-    if (msg === "GALAXY_PADDLE_TIER_ALREADY_RECORDED") {
+    if (
+      !world ||
+      world.status !== "active" ||
+      world.allowPublicAccess !== true
+    ) {
       return NextResponse.json(
         {
+          success: false,
           error:
-            "Tier already recorded this week. Improve your run to earn more XP.",
+            "This BitGalaxy world is not currently available.",
         },
-        { status: 409 },
+        { status: 403 },
       );
     }
 
-    if (msg === "GALAXY_PADDLE_NO_XP_DELTA") {
+    if (
+      !quest ||
+      quest.isActive !== true ||
+      quest.type !== "arcade"
+    ) {
       return NextResponse.json(
         {
+          success: false,
           error:
-            "No extra XP for this run. You’ve already logged an equal or higher tier this week.",
-        },
-        { status: 409 },
-      );
-    }
-
-    if (msg.startsWith("PLAYER_NOT_FOUND::")) {
-      return NextResponse.json(
-        {
-          error:
-            "Player profile not found in this world. Refresh the BitGalaxy dashboard and re-link your ID.",
+            "Galaxy Paddle is not currently available.",
         },
         { status: 404 },
       );
     }
 
+    const levelDefinitions = resolveLevelDefinitions(
+      quest.metadata,
+      quest.xp,
+    );
+
+    const memberRef = adminDb
+      .collection("members")
+      .doc(memberId);
+
+    const orgLinkRef = memberRef
+      .collection("orgLinks")
+      .doc(orgId);
+
+    const moduleRef = orgLinkRef
+      .collection("modules")
+      .doc(MODULE_ID);
+
+    const stateRef = moduleRef
+      .collection("state")
+      .doc("current");
+
+    const gameRef = moduleRef
+      .collection("games")
+      .doc(GAME_ID);
+
+    const activityRef = adminDb
+      .collection("activities")
+      .doc();
+
+    const weekKey = getISOWeekKey(new Date());
+
+    const result = await adminDb.runTransaction(
+      async (transaction) => {
+        const [
+          memberSnapshot,
+          orgLinkSnapshot,
+          stateSnapshot,
+          gameSnapshot,
+        ] = await Promise.all([
+          transaction.get(memberRef),
+          transaction.get(orgLinkRef),
+          transaction.get(stateRef),
+          transaction.get(gameRef),
+        ]);
+
+        if (!memberSnapshot.exists) {
+          throw new Error(
+            `MEMBER_NOT_FOUND:${memberId}`,
+          );
+        }
+
+        if (!orgLinkSnapshot.exists) {
+          throw new Error(
+            `MEMBER_NOT_CONNECTED:${memberId}`,
+          );
+        }
+
+        const stateData = stateSnapshot.data() ?? {};
+
+        const gameData = (
+          gameSnapshot.data() ?? {}
+        ) as StoredGalaxyPaddleGame;
+
+        const previousWeeklyWeekKey =
+          typeof gameData.weeklyWeekKey === "string"
+            ? gameData.weeklyWeekKey
+            : "";
+
+        const previousWeeklyBestLevel =
+          previousWeeklyWeekKey === weekKey
+            ? normalizeStoredNonNegativeInteger(
+                gameData.weeklyBestLevel,
+              )
+            : 0;
+
+        const previousWeeklyReward = xpForLevel(
+          previousWeeklyBestLevel,
+          levelDefinitions,
+        );
+
+        const requestedWeeklyReward = xpForLevel(
+          finalLevel,
+          levelDefinitions,
+        );
+
+        const xpAwarded =
+          finalLevel > previousWeeklyBestLevel
+            ? Math.max(
+                0,
+                requestedWeeklyReward -
+                  previousWeeklyReward,
+              )
+            : 0;
+
+        const previousBestLevel =
+          normalizeStoredNonNegativeInteger(
+            gameData.bestLevel,
+          );
+
+        const previousBestHits =
+          normalizeStoredNullableNonNegativeInteger(
+            gameData.bestHits,
+          );
+
+        const previousBestTimeMs =
+          normalizeStoredNullablePositiveInteger(
+            gameData.bestTimeMs,
+          );
+
+        const previousBestMaxSpeed =
+          normalizeStoredNullableNonNegativeNumber(
+            gameData.bestMaxSpeed,
+          );
+
+        const nextBestLevel = Math.max(
+          previousBestLevel,
+          finalLevel,
+        );
+
+        const nextBestHits =
+          previousBestHits === null
+            ? hits
+            : Math.max(previousBestHits, hits);
+
+        const nextBestTimeMs =
+          previousBestTimeMs === null
+            ? timeMs
+            : Math.max(previousBestTimeMs, timeMs);
+
+        const nextBestMaxSpeed =
+          previousBestMaxSpeed === null
+            ? maxSpeed
+            : Math.max(previousBestMaxSpeed, maxSpeed);
+
+        const statsImproved =
+          previousBestLevel === 0 ||
+          finalLevel > previousBestLevel ||
+          previousBestHits === null ||
+          hits > previousBestHits ||
+          previousBestTimeMs === null ||
+          timeMs > previousBestTimeMs ||
+          previousBestMaxSpeed === null ||
+          maxSpeed > previousBestMaxSpeed;
+
+        const nextWeeklyBestLevel = Math.max(
+          previousWeeklyBestLevel,
+          finalLevel,
+        );
+
+        const previousTotalXP =
+          normalizeStoredNonNegativeInteger(
+            stateData.totalXP,
+          );
+
+        const resultingTotalXP =
+          previousTotalXP + xpAwarded;
+
+        const resultingRank =
+          getRankForXP(resultingTotalXP);
+
+        const resultingLevel =
+          getLevelForXP(resultingTotalXP);
+
+        const previousWeeklyXP =
+          stateData.weeklyWeekKey === weekKey
+            ? normalizeStoredNonNegativeInteger(
+                stateData.weeklyXP,
+              )
+            : 0;
+
+        const resultingWeeklyXP =
+          previousWeeklyXP + xpAwarded;
+
+        const completedQuestIds =
+          normalizeStringArray(
+            stateData.completedQuestIds,
+          );
+
+        const questCompletionCounts =
+          normalizeCompletionCounts(
+            stateData.questCompletionCounts,
+          );
+
+        const nextCompletedQuestIds =
+          completedQuestIds.includes(GAME_ID)
+            ? completedQuestIds
+            : [...completedQuestIds, GAME_ID];
+
+        const nextCompletionCount =
+          (questCompletionCounts[GAME_ID] ?? 0) + 1;
+
+        const now = FieldValue.serverTimestamp();
+
+        transaction.set(
+          gameRef,
+          {
+            gameId: GAME_ID,
+            moduleId: MODULE_ID,
+            orgId,
+            memberId,
+
+            completed: true,
+
+            weeklyWeekKey: weekKey,
+            weeklyBestLevel:
+              nextWeeklyBestLevel,
+
+            bestLevel: nextBestLevel,
+            bestHits: nextBestHits,
+            bestTimeMs: nextBestTimeMs,
+            bestMaxSpeed: nextBestMaxSpeed,
+
+            lastResult: {
+              requestedLevel,
+              justifiedLevel,
+              level: finalLevel,
+
+              hits,
+              timeMs,
+              maxSpeed,
+
+              xpAwarded,
+              completedAt: now,
+            },
+
+            updatedAt: now,
+
+            ...(gameSnapshot.exists
+              ? {}
+              : {
+                  createdAt: now,
+                }),
+          },
+          {
+            merge: true,
+          },
+        );
+
+        transaction.set(
+          stateRef,
+          {
+            moduleId: MODULE_ID,
+            orgId,
+            memberId,
+
+            totalXP: resultingTotalXP,
+            rank: resultingRank,
+            level: resultingLevel,
+
+            weeklyXP: resultingWeeklyXP,
+            weeklyWeekKey: weekKey,
+
+            completedQuestIds:
+              nextCompletedQuestIds,
+
+            questCompletionCounts: {
+              ...questCompletionCounts,
+              [GAME_ID]: nextCompletionCount,
+            },
+
+            updatedAt: now,
+
+            ...(stateSnapshot.exists
+              ? {}
+              : {
+                  activeQuestIds: [],
+                  createdAt: now,
+                }),
+          },
+          {
+            merge: true,
+          },
+        );
+
+        transaction.set(activityRef, {
+          activityId: activityRef.id,
+
+          system: MODULE_ID,
+          moduleId: MODULE_ID,
+
+          orgId,
+          memberId,
+
+          eventType:
+            xpAwarded > 0
+              ? "arcade_tier_complete"
+              : "arcade_run",
+
+          xpChange: xpAwarded,
+
+          questId: GAME_ID,
+          gameId: GAME_ID,
+          rewardId: null,
+
+          source: "galaxy_paddle",
+
+          meta: {
+            weekKey,
+
+            requestedLevel,
+            justifiedLevel,
+            submittedLevel: finalLevel,
+
+            previousWeeklyBestLevel,
+            resultingWeeklyBestLevel:
+              nextWeeklyBestLevel,
+
+            statsImproved,
+
+            hits,
+            timeMs,
+            maxSpeed,
+
+            previousTotalXP,
+            resultingTotalXP,
+
+            resultingRank,
+            resultingLevel,
+
+            resultingWeeklyXP,
+            weeklyWeekKey: weekKey,
+          },
+
+          occurredAt: now,
+          createdAt: now,
+        });
+
+        return {
+          weekKey,
+
+          requestedLevel,
+          justifiedLevel,
+          submittedLevel: finalLevel,
+
+          weeklyBestLevel:
+            nextWeeklyBestLevel,
+
+          xpAwarded,
+          statsImproved,
+
+          bestLevel: nextBestLevel,
+          bestHits: nextBestHits,
+          bestTimeMs: nextBestTimeMs,
+          bestMaxSpeed: nextBestMaxSpeed,
+        };
+      },
+    );
+
+    const [player, activeQuests] =
+      await Promise.all([
+        getPlayer(orgId, memberId),
+        getActiveQuests(orgId, memberId),
+      ]);
+
+    if (!player) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Galaxy Paddle was recorded, but updated member progress could not be loaded.",
+        },
+        { status: 500 },
+      );
+    }
+
+    const progress = getRankProgress(
+      player.totalXP,
+    );
+
+    return NextResponse.json({
+      success: true,
+
+      orgId,
+      memberId,
+      gameId: GAME_ID,
+
+      result,
+      activeQuests,
+
+      player: {
+        memberId: player.memberId,
+        orgId: player.orgId,
+
+        displayName:
+          player.displayName ?? null,
+
+        totalXP: player.totalXP,
+        rank: player.rank,
+        level: player.level,
+
+        weeklyXP: player.weeklyXP,
+        weeklyWeekKey:
+          player.weeklyWeekKey,
+
+        progress,
+      },
+    });
+  } catch (error: unknown) {
+    console.error(
+      "[bitgalaxy:complete-galaxy-paddle:POST]",
+      error,
+    );
+
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to complete Galaxy Paddle.";
+
+    if (
+      message.startsWith(
+        "MEMBER_NOT_FOUND:",
+      )
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Member profile not found.",
+        },
+        { status: 404 },
+      );
+    }
+
+    if (
+      message.startsWith(
+        "MEMBER_NOT_CONNECTED:",
+      )
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Member is not connected to this organization.",
+        },
+        { status: 403 },
+      );
+    }
+
+    const status = getErrorStatus(error);
+
     return NextResponse.json(
-      { error: error?.message ?? "Failed to complete Galaxy Paddle quest" },
-      { status: 500 },
+      {
+        success: false,
+        error:
+          status === 500
+            ? "Failed to complete Galaxy Paddle."
+            : message,
+      },
+      { status },
     );
   }
+}
+
+function computeGalaxyPaddleTierFromStats({
+  hits,
+  timeMs,
+}: {
+  hits: number;
+  timeMs: number;
+}): DifficultyLevel {
+  const seconds = timeMs / 1000;
+
+  if (seconds >= 45 || hits >= 30) {
+    return 3;
+  }
+
+  if (seconds >= 25 || hits >= 15) {
+    return 2;
+  }
+
+  return 1;
+}
+
+function normalizeRequiredString(
+  value: unknown,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return normalized || null;
+}
+
+function normalizeOptionalString(
+  value: unknown,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return normalized || null;
+}
+
+function normalizeLevel(
+  value: unknown,
+): DifficultyLevel | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isInteger(parsed) ||
+    parsed < 1 ||
+    parsed > 3
+  ) {
+    return null;
+  }
+
+  return parsed as DifficultyLevel;
+}
+
+function normalizePositiveInteger(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed <= 0
+  ) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeNonNegativeInteger(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0
+  ) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeNonNegativeNumber(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0
+  ) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function normalizeStoredNonNegativeInteger(
+  value: unknown,
+): number {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0
+  ) {
+    return 0;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeStoredNullablePositiveInteger(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed <= 0
+  ) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeStoredNullableNonNegativeInteger(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0
+  ) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeStoredNullableNonNegativeNumber(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0
+  ) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function normalizeStringArray(
+  value: unknown,
+): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      value
+        .filter(
+          (entry): entry is string =>
+            typeof entry === "string",
+        )
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function normalizeCompletionCounts(
+  value: unknown,
+): Record<string, number> {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return {};
+  }
+
+  const normalized: Record<string, number> =
+    {};
+
+  for (const [rawKey, rawValue] of Object.entries(
+    value,
+  )) {
+    const key = rawKey.trim();
+
+    if (!key) {
+      continue;
+    }
+
+    normalized[key] =
+      normalizeStoredNonNegativeInteger(
+        rawValue,
+      );
+  }
+
+  return normalized;
+}
+
+function resolveLevelDefinitions(
+  metadata: unknown,
+  fallbackXP: number,
+): LevelDefinition[] {
+  const metadataRecord =
+    metadata &&
+    typeof metadata === "object" &&
+    !Array.isArray(metadata)
+      ? (metadata as Record<
+          string,
+          unknown
+        >)
+      : {};
+
+  const rawLevels = Array.isArray(
+    metadataRecord.levels,
+  )
+    ? metadataRecord.levels
+    : [];
+
+  const normalizedFallbackXP = Math.max(
+    0,
+    Math.floor(
+      Number.isFinite(Number(fallbackXP))
+        ? Number(fallbackXP)
+        : 50,
+    ),
+  );
+
+  return FALLBACK_LEVELS.map(
+    (fallbackDefinition) => {
+      const configuredDefinition =
+        rawLevels.find((entry) => {
+          if (
+            !entry ||
+            typeof entry !== "object" ||
+            Array.isArray(entry)
+          ) {
+            return false;
+          }
+
+          return (
+            Number(
+              (
+                entry as Record<
+                  string,
+                  unknown
+                >
+              ).level,
+            ) === fallbackDefinition.level
+          );
+        });
+
+      if (
+        !configuredDefinition ||
+        typeof configuredDefinition !==
+          "object"
+      ) {
+        return {
+          level:
+            fallbackDefinition.level,
+
+          xp:
+            fallbackDefinition.level *
+            normalizedFallbackXP,
+        };
+      }
+
+      const configuredData =
+        configuredDefinition as Record<
+          string,
+          unknown
+        >;
+
+      const configuredXP =
+        normalizeStoredNonNegativeInteger(
+          configuredData.xp,
+        );
+
+      return {
+        level:
+          fallbackDefinition.level,
+
+        xp:
+          configuredXP > 0
+            ? configuredXP
+            : fallbackDefinition.level *
+              normalizedFallbackXP,
+      };
+    },
+  );
+}
+
+function xpForLevel(
+  level: number,
+  levels: LevelDefinition[],
+): number {
+  if (level <= 0) {
+    return 0;
+  }
+
+  return (
+    levels.find(
+      (definition) =>
+        definition.level === level,
+    )?.xp ?? 0
+  );
+}
+
+function getErrorStatus(
+  error: unknown,
+): number {
+  if (
+    error &&
+    typeof error === "object" &&
+    "status" in error
+  ) {
+    const status = Number(
+      (error as { status?: unknown })
+        .status,
+    );
+
+    if (
+      Number.isInteger(status) &&
+      status >= 400 &&
+      status <= 599
+    ) {
+      return status;
+    }
+  }
+
+  return 500;
 }

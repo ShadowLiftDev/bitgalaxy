@@ -1,118 +1,311 @@
-import { adminDb } from "@/lib/firebase-admin";
-import { getRankForXP } from "./rankEngine";
 import { FieldValue } from "firebase-admin/firestore";
+
+import { adminDb } from "@/lib/firebase-admin";
 import { getISOWeekKey } from "@/lib/weekKey";
 
+import { getRankForXP } from "./rankEngine";
+
 export interface UpdateXPOptions {
-  source?: string;
+  source?: string | null;
   questId?: string | null;
   rewardId?: string | null;
-  meta?: Record<string, any>;
+  gameId?: string | null;
+  meta?: Record<string, unknown>;
 }
 
 function getLevelForXP(totalXP: number): number {
-  const xp = Math.max(0, Math.floor(totalXP || 0));
-  // simple, readable: 1 level per 1,000 XP
-  return Math.floor(xp / 1000) + 1;
+  const normalizedXP = Math.max(
+    0,
+    Math.floor(totalXP),
+  );
+
+  return Math.floor(normalizedXP / 1000) + 1;
 }
 
-function cleanMeta(meta?: Record<string, any>) {
-  const cleaned: Record<string, any> = {};
-  if (!meta) return cleaned;
-  for (const [k, v] of Object.entries(meta)) {
-    if (v !== undefined) cleaned[k] = v;
+function normalizeRequiredId(
+  value: string,
+  fieldName: string,
+): string {
+  const normalized = value.trim();
+
+  if (!normalized) {
+    throw new Error(
+      `updateXP: ${fieldName} is required`,
+    );
   }
-  return cleaned;
+
+  return normalized;
+}
+
+function normalizeFiniteNumber(
+  value: unknown,
+  fallback = 0,
+): number {
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed)
+    ? parsed
+    : fallback;
+}
+
+function normalizeNonNegativeInteger(
+  value: unknown,
+  fallback = 0,
+): number {
+  const parsed = normalizeFiniteNumber(
+    value,
+    fallback,
+  );
+
+  return Math.max(0, Math.floor(parsed));
+}
+
+function normalizeOptionalString(
+  value: unknown,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return normalized || null;
+}
+
+function cleanMeta(
+  meta?: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (!meta) {
+    return null;
+  }
+
+  const cleaned: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(meta)) {
+    if (value !== undefined) {
+      cleaned[key] = value;
+    }
+  }
+
+  return Object.keys(cleaned).length
+    ? cleaned
+    : null;
 }
 
 /**
- * Atomically adjusts a player's XP and updates:
- * - totalXP
- * - rank
- * - level
- * - weeklyXP (auto-resets on week change)
- * - weeklyWeekKey
+ * Atomically adjusts a member's BitGalaxy XP and writes
+ * the corresponding immutable activity record.
  *
- * ALSO writes an XP audit log entry in the same transaction
- * so you never get "XP changed but no history record".
+ * Live state:
+ * members/{memberId}/orgLinks/{orgId}/modules/bitgalaxy/state/current
+ *
+ * History:
+ * activities/{activityId}
  */
 export async function updateXP(
   orgId: string,
-  userId: string,
+  memberId: string,
   deltaXP: number,
   options: UpdateXPOptions = {},
 ): Promise<void> {
-  if (!orgId) throw new Error("updateXP: orgId is required");
-  if (!userId) throw new Error("updateXP: userId is required");
+  const normalizedOrgId = normalizeRequiredId(
+    orgId,
+    "orgId",
+  );
+
+  const normalizedMemberId =
+    normalizeRequiredId(
+      memberId,
+      "memberId",
+    );
+
   if (!Number.isFinite(deltaXP)) {
-    throw new Error("updateXP: deltaXP must be a finite number");
+    throw new Error(
+      "updateXP: deltaXP must be a finite number",
+    );
   }
 
-  // No-op: don't write player updates or history
-  if (deltaXP === 0) return;
+  const normalizedDeltaXP =
+    Math.trunc(deltaXP);
 
-  const playerRef = adminDb
-    .collection("orgs")
-    .doc(orgId)
-    .collection("bitgalaxyPlayers")
-    .doc(userId);
+  if (normalizedDeltaXP === 0) {
+    return;
+  }
+
+  const memberRef = adminDb
+    .collection("members")
+    .doc(normalizedMemberId);
+
+  const orgLinkRef = memberRef
+    .collection("orgLinks")
+    .doc(normalizedOrgId);
+
+  const stateRef = orgLinkRef
+    .collection("modules")
+    .doc("bitgalaxy")
+    .collection("state")
+    .doc("current");
+
+  const activityRef = adminDb
+    .collection("activities")
+    .doc();
 
   const weekKey = getISOWeekKey(new Date());
 
-  await adminDb.runTransaction(async (tx) => {
-    const snap = await tx.get(playerRef);
-    if (!snap.exists) {
+  await adminDb.runTransaction(async (transaction) => {
+    const [
+      memberSnapshot,
+      orgLinkSnapshot,
+      stateSnapshot,
+    ] = await Promise.all([
+      transaction.get(memberRef),
+      transaction.get(orgLinkRef),
+      transaction.get(stateRef),
+    ]);
+
+    if (!memberSnapshot.exists) {
       throw new Error(
-        `updateXP: player ${userId} does not exist in org ${orgId}`,
+        `updateXP: member ${normalizedMemberId} does not exist`,
       );
     }
 
-    const data = snap.data() as any;
+    if (!orgLinkSnapshot.exists) {
+      throw new Error(
+        `updateXP: member ${normalizedMemberId} is not connected to org ${normalizedOrgId}`,
+      );
+    }
 
-    const currentXP = Number(data.totalXP || 0);
-    const newXP = Math.max(0, currentXP + deltaXP);
+    const stateData =
+      stateSnapshot.data() ?? {};
+
+    const currentXP =
+      normalizeNonNegativeInteger(
+        stateData.totalXP,
+        0,
+      );
+
+    const requestedNewXP =
+      currentXP + normalizedDeltaXP;
+
+    const newXP = Math.max(
+      0,
+      requestedNewXP,
+    );
+
+    /*
+     * When subtracting more XP than the member has,
+     * the actual applied change differs from the
+     * requested delta.
+     */
+    const appliedDeltaXP =
+      newXP - currentXP;
+
+    if (appliedDeltaXP === 0) {
+      return;
+    }
 
     const newRank = getRankForXP(newXP);
     const newLevel = getLevelForXP(newXP);
 
-    const prevWeekKey = String(data.weeklyWeekKey || "");
-    const prevWeeklyXP = Number(data.weeklyXP || 0);
+    const previousWeekKey =
+      typeof stateData.weeklyWeekKey === "string"
+        ? stateData.weeklyWeekKey
+        : "";
 
-    const baseWeekly = prevWeekKey === weekKey ? prevWeeklyXP : 0;
-    const newWeeklyXP = Math.max(0, baseWeekly + deltaXP);
+    const previousWeeklyXP =
+      normalizeNonNegativeInteger(
+        stateData.weeklyXP,
+        0,
+      );
+
+    const baseWeeklyXP =
+      previousWeekKey === weekKey
+        ? previousWeeklyXP
+        : 0;
+
+    const newWeeklyXP = Math.max(
+      0,
+      baseWeeklyXP + appliedDeltaXP,
+    );
 
     const now = FieldValue.serverTimestamp();
 
-    // ✅ Player update
-    tx.update(playerRef, {
-      totalXP: newXP,
-      rank: newRank,
-      level: newLevel,
-      weeklyXP: newWeeklyXP,
-      weeklyWeekKey: weekKey,
-      updatedAt: now,
-    });
+    transaction.set(
+      stateRef,
+      {
+        moduleId: "bitgalaxy",
+        orgId: normalizedOrgId,
+        memberId: normalizedMemberId,
 
-    // ✅ Atomic history log entry
-    const historyRef = playerRef.collection("history").doc();
+        totalXP: newXP,
+        rank: newRank,
+        level: newLevel,
 
-    const meta = cleanMeta({
+        weeklyXP: newWeeklyXP,
+        weeklyWeekKey: weekKey,
+
+        updatedAt: now,
+
+        ...(stateSnapshot.exists
+          ? {}
+          : {
+              activeQuestIds: [],
+              completedQuestIds: [],
+              questCompletionCounts: {},
+              createdAt: now,
+            }),
+      },
+      {
+        merge: true,
+      },
+    );
+
+    const activityMeta = cleanMeta({
       ...(options.meta ?? {}),
-      weeklyWeekKey: weekKey,
-      // optional but useful to query history later:
+
+      requestedDeltaXP:
+        normalizedDeltaXP,
+      appliedDeltaXP,
+
+      previousTotalXP: currentXP,
       resultingTotalXP: newXP,
+
       resultingRank: newRank,
       resultingLevel: newLevel,
+
+      weeklyWeekKey: weekKey,
+      resultingWeeklyXP: newWeeklyXP,
     });
 
-    tx.set(historyRef, {
+    transaction.set(activityRef, {
+      activityId: activityRef.id,
+
+      system: "bitgalaxy",
+      moduleId: "bitgalaxy",
+
+      orgId: normalizedOrgId,
+      memberId: normalizedMemberId,
+
       eventType: "xp",
-      xpChange: deltaXP,
-      questId: options.questId ?? null,
-      rewardId: options.rewardId ?? null,
-      source: options.source ?? null,
-      meta: Object.keys(meta).length ? meta : null,
-      timestamp: now,
+      xpChange: appliedDeltaXP,
+
+      questId: normalizeOptionalString(
+        options.questId,
+      ),
+      rewardId: normalizeOptionalString(
+        options.rewardId,
+      ),
+      gameId: normalizeOptionalString(
+        options.gameId,
+      ),
+
+      source: normalizeOptionalString(
+        options.source,
+      ),
+      meta: activityMeta,
+
+      occurredAt: now,
+      createdAt: now,
     });
   });
 }

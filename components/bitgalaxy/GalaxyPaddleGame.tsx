@@ -1,102 +1,223 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
+
 import { GameQuestShell } from "./GameQuestShell";
 
 type GalaxyPaddleGameProps = {
   orgId: string;
-  userId: string | null;
+  worldName: string;
+
+  memberId: string | null;
+  memberName?: string | null;
+
   isGuest: boolean;
 };
 
 type GameConfig = {
   width: number;
   height: number;
+
   paddleWidth: number;
   paddleHeight: number;
   paddleMarginBottom: number;
+
   ballRadius: number;
+};
+
+type GameState = {
+  paddleX: number;
+
+  ballX: number;
+  ballY: number;
+
+  velX: number;
+  velY: number;
+
+  running: boolean;
+  gameOver: boolean;
+
+  hits: number;
+  maxSpeed: number;
+};
+
+type DifficultyLevel = 1 | 2 | 3;
+
+type GalaxyPaddleCompletionResponse = {
+  success?: boolean;
+  error?: string;
+
+  result?: {
+    weekKey?: string;
+
+    requestedLevel?: number;
+    justifiedLevel?: number;
+    submittedLevel?: number;
+
+    weeklyBestLevel?: number;
+
+    xpAwarded?: number;
+    statsImproved?: boolean;
+
+    bestLevel?: number;
+    bestHits?: number | null;
+    bestTimeMs?: number | null;
+    bestMaxSpeed?: number | null;
+  };
 };
 
 const CONFIG: GameConfig = {
   width: 320,
   height: 440,
+
   paddleWidth: 80,
   paddleHeight: 10,
   paddleMarginBottom: 24,
+
   ballRadius: 8,
 };
 
-type GameState = {
-  paddleX: number;
-  ballX: number;
-  ballY: number;
-  velX: number;
-  velY: number;
-  running: boolean;
-  gameOver: boolean;
-  hits: number;
-  maxSpeed: number;
-};
+function computeTierFromStats(
+  hits: number,
+  elapsedMs: number,
+): DifficultyLevel {
+  const seconds = elapsedMs / 1000;
 
-function computeTierFromStats(hits: number, elapsedMs: number): 1 | 2 | 3 {
-  const sec = elapsedMs / 1000;
+  if (
+    seconds >= 45 ||
+    hits >= 30
+  ) {
+    return 3;
+  }
 
-  // Tunable thresholds
-  const t1 = sec >= 10 || hits >= 5;
-  const t2 = sec >= 25 || hits >= 15;
-  const t3 = sec >= 45 || hits >= 30;
+  if (
+    seconds >= 25 ||
+    hits >= 15
+  ) {
+    return 2;
+  }
 
-  if (t3) return 3;
-  if (t2) return 2;
-  if (t1) return 1;
   return 1;
+}
+
+function buildReturnHref({
+  orgId,
+  memberId,
+  isGuest,
+}: {
+  orgId: string;
+  memberId: string | null;
+  isGuest: boolean;
+}): string {
+  const searchParams =
+    new URLSearchParams({
+      orgId,
+    });
+
+  if (isGuest) {
+    searchParams.set("guest", "1");
+  } else if (memberId) {
+    searchParams.set(
+      "memberId",
+      memberId,
+    );
+  }
+
+  return `/bitgalaxy/games?${searchParams.toString()}`;
 }
 
 export function GalaxyPaddleGame({
   orgId,
-  userId,
+  worldName,
+  memberId,
+  memberName = null,
   isGuest,
 }: GalaxyPaddleGameProps) {
   const router = useRouter();
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const gameStateRef = useRef<GameState | null>(null);
-  const animationRef = useRef<number | null>(null);
 
-  // visible stats
-  const [hits, setHits] = useState(0);
-  const [maxSpeed, setMaxSpeed] = useState(0);
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const [isRunning, setIsRunning] = useState(false);
-  const [gameOver, setGameOver] = useState(false);
+  const canvasRef =
+    useRef<HTMLCanvasElement | null>(
+      null,
+    );
 
-  // tier (weekly 3-tier system)
-  const [tier, setTier] = useState<1 | 2 | 3>(1);
+  const gameStateRef =
+    useRef<GameState | null>(null);
 
-  // submit state
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [submitSuccess, setSubmitSuccess] = useState(false);
+  const animationRef =
+    useRef<number | null>(null);
 
-  // timer bookkeeping
-  const timerStartRef = useRef<number | null>(null);
+  const timerStartRef =
+    useRef<number | null>(null);
 
-  const seconds = (elapsedMs / 1000).toFixed(1);
+  const [hits, setHits] =
+    useState(0);
+
+  const [maxSpeed, setMaxSpeed] =
+    useState(0);
+
+  const [elapsedMs, setElapsedMs] =
+    useState(0);
+
+  const [isRunning, setIsRunning] =
+    useState(false);
+
+  const [gameOver, setGameOver] =
+    useState(false);
+
+  const [tier, setTier] =
+    useState<DifficultyLevel>(1);
+
+  const [submitting, setSubmitting] =
+    useState(false);
+
+  const [submitError, setSubmitError] =
+    useState<string | null>(null);
+
+  const [submitMessage, setSubmitMessage] =
+    useState<string | null>(null);
+
+  const seconds = (
+    elapsedMs / 1000
+  ).toFixed(1);
+
+  const returnHref = buildReturnHref({
+    orgId,
+    memberId,
+    isGuest,
+  });
 
   function initGameState() {
-    const { width, height, paddleWidth, paddleMarginBottom } = CONFIG;
-    const paddleX = (width - paddleWidth) / 2;
-    const initialSpeed = Math.sqrt(2.2 * 2.2 + 3.0 * 3.0);
+    const {
+      width,
+      height,
+      paddleWidth,
+    } = CONFIG;
+
+    const paddleX =
+      (width - paddleWidth) / 2;
+
+    const initialSpeed = Math.sqrt(
+      2.2 * 2.2 +
+        3.0 * 3.0,
+    );
 
     gameStateRef.current = {
       paddleX,
+
       ballX: width / 2,
       ballY: height / 2,
+
       velX: 2.2,
-      velY: -3.0,
+      velY: -3,
+
       running: false,
       gameOver: false,
+
       hits: 0,
       maxSpeed: initialSpeed,
     };
@@ -104,227 +225,477 @@ export function GalaxyPaddleGame({
     setHits(0);
     setMaxSpeed(initialSpeed);
     setElapsedMs(0);
+
     setIsRunning(false);
     setGameOver(false);
+
     setTier(1);
+
     setSubmitError(null);
-    setSubmitSuccess(false);
+    setSubmitMessage(null);
+
     timerStartRef.current = null;
   }
 
   useEffect(() => {
     initGameState();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas =
+      canvasRef.current;
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!canvas) {
+      return;
+    }
 
-    const { width, height, paddleWidth, paddleHeight, paddleMarginBottom, ballRadius } =
-      CONFIG;
+    const context =
+      canvas.getContext("2d");
+
+    if (!context) {
+      return;
+    }
+
+    const {
+      width,
+      height,
+
+      paddleWidth,
+      paddleHeight,
+      paddleMarginBottom,
+
+      ballRadius,
+    } = CONFIG;
 
     const drawFrame = () => {
-      const state = gameStateRef.current;
+      const state =
+        gameStateRef.current;
+
       if (!state) {
-        animationRef.current = requestAnimationFrame(drawFrame);
+        animationRef.current =
+          requestAnimationFrame(
+            drawFrame,
+          );
+
         return;
       }
 
       let {
         paddleX,
+
         ballX,
         ballY,
+
         velX,
         velY,
+
         running,
-        gameOver: stateGameOver,
-        hits: localHits,
-        maxSpeed: localMaxSpeed,
+        gameOver: currentGameOver,
+
+        hits: currentHits,
+        maxSpeed: currentMaxSpeed,
       } = state;
 
-      const now = performance.now();
+      const now =
+        performance.now();
 
-      if (running && !stateGameOver) {
-        if (timerStartRef.current == null) {
-          timerStartRef.current = now;
+      if (
+        running &&
+        !currentGameOver
+      ) {
+        if (
+          timerStartRef.current ===
+          null
+        ) {
+          timerStartRef.current =
+            now;
         }
-        const elapsed = now - timerStartRef.current;
+
+        const elapsed =
+          now -
+          timerStartRef.current;
+
         setElapsedMs(elapsed);
 
         ballX += velX;
         ballY += velY;
 
-        // walls
-        if (ballX - ballRadius <= 0) {
+        if (
+          ballX - ballRadius <=
+          0
+        ) {
           ballX = ballRadius;
           velX = Math.abs(velX);
-        } else if (ballX + ballRadius >= width) {
-          ballX = width - ballRadius;
-          velX = -Math.abs(velX);
+        } else if (
+          ballX + ballRadius >=
+          width
+        ) {
+          ballX =
+            width - ballRadius;
+
+          velX =
+            -Math.abs(velX);
         }
 
-        // top
-        if (ballY - ballRadius <= 0) {
+        if (
+          ballY - ballRadius <=
+          0
+        ) {
           ballY = ballRadius;
           velY = Math.abs(velY);
         }
 
-        // paddle
-        const paddleTopY = height - paddleMarginBottom - paddleHeight;
-        const paddleBottomY = height - paddleMarginBottom;
+        const paddleTopY =
+          height -
+          paddleMarginBottom -
+          paddleHeight;
 
-        if (
-          ballY + ballRadius >= paddleTopY &&
-          ballY + ballRadius <= paddleBottomY &&
+        const paddleBottomY =
+          height -
+          paddleMarginBottom;
+
+        const hitPaddle =
+          ballY + ballRadius >=
+            paddleTopY &&
+          ballY + ballRadius <=
+            paddleBottomY &&
           ballX >= paddleX &&
-          ballX <= paddleX + paddleWidth &&
-          velY > 0
-        ) {
-          ballY = paddleTopY - ballRadius;
-          velY = -Math.abs(velY);
+          ballX <=
+            paddleX + paddleWidth &&
+          velY > 0;
 
-          const hitPos =
-            (ballX - (paddleX + paddleWidth / 2)) / (paddleWidth / 2);
-          velX = velX + hitPos * 1.4;
+        if (hitPaddle) {
+          ballY =
+            paddleTopY -
+            ballRadius;
 
-          const speed = Math.sqrt(velX * velX + velY * velY);
-          const speedFactor = 1.04;
-          const newSpeed = speed * speedFactor;
-          const normX = velX / speed;
-          const normY = velY / speed;
-          velX = normX * newSpeed;
-          velY = normY * newSpeed;
+          velY =
+            -Math.abs(velY);
 
-          localHits += 1;
-          localMaxSpeed = Math.max(localMaxSpeed, newSpeed);
+          const hitPosition =
+            (ballX -
+              (paddleX +
+                paddleWidth / 2)) /
+            (paddleWidth / 2);
 
-          setHits(localHits);
-          setMaxSpeed(localMaxSpeed);
+          velX +=
+            hitPosition * 1.4;
+
+          const speed = Math.sqrt(
+            velX * velX +
+              velY * velY,
+          );
+
+          const nextSpeed =
+            speed * 1.04;
+
+          const normalizedX =
+            velX / speed;
+
+          const normalizedY =
+            velY / speed;
+
+          velX =
+            normalizedX *
+            nextSpeed;
+
+          velY =
+            normalizedY *
+            nextSpeed;
+
+          currentHits += 1;
+
+          currentMaxSpeed =
+            Math.max(
+              currentMaxSpeed,
+              nextSpeed,
+            );
+
+          setHits(currentHits);
+
+          setMaxSpeed(
+            currentMaxSpeed,
+          );
         }
 
-        // miss
-        if (ballY - ballRadius > height) {
+        if (
+          ballY - ballRadius >
+          height
+        ) {
           running = false;
-          stateGameOver = true;
+          currentGameOver = true;
+
           setIsRunning(false);
           setGameOver(true);
 
-          // Deterministic tier calculation based on the final stats
           const finalElapsed =
-            timerStartRef.current != null ? now - timerStartRef.current : elapsedMs;
-          const computedTier = computeTierFromStats(localHits, finalElapsed);
-          setTier(computedTier);
+            timerStartRef.current !==
+            null
+              ? now -
+                timerStartRef.current
+              : elapsed;
+
+          setElapsedMs(
+            finalElapsed,
+          );
+
+          const computedTier =
+            computeTierFromStats(
+              currentHits,
+              finalElapsed,
+            );
+
+          setTier(
+            computedTier,
+          );
         }
 
         gameStateRef.current = {
           paddleX,
+
           ballX,
           ballY,
+
           velX,
           velY,
+
           running,
-          gameOver: stateGameOver,
-          hits: localHits,
-          maxSpeed: localMaxSpeed,
+          gameOver:
+            currentGameOver,
+
+          hits: currentHits,
+          maxSpeed:
+            currentMaxSpeed,
         };
       }
 
-      // draw
-      ctx.clearRect(0, 0, width, height);
+      context.clearRect(
+        0,
+        0,
+        width,
+        height,
+      );
 
-      const gradient = ctx.createLinearGradient(0, 0, width, height);
-      gradient.addColorStop(0, "#020617");
-      gradient.addColorStop(1, "#0f172a");
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, width, height);
+      const gradient =
+        context.createLinearGradient(
+          0,
+          0,
+          width,
+          height,
+        );
 
-      ctx.strokeStyle = "rgba(56,189,248,0.10)";
-      ctx.lineWidth = 1;
+      gradient.addColorStop(
+        0,
+        "#020617",
+      );
+
+      gradient.addColorStop(
+        1,
+        "#0f172a",
+      );
+
+      context.fillStyle =
+        gradient;
+
+      context.fillRect(
+        0,
+        0,
+        width,
+        height,
+      );
+
+      context.strokeStyle =
+        "rgba(56,189,248,0.10)";
+
+      context.lineWidth = 1;
+
       const gridSize = 40;
-      for (let y = height; y > 0; y -= gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(width, y - gridSize / 2);
-        ctx.stroke();
+
+      for (
+        let y = height;
+        y > 0;
+        y -= gridSize
+      ) {
+        context.beginPath();
+
+        context.moveTo(0, y);
+
+        context.lineTo(
+          width,
+          y - gridSize / 2,
+        );
+
+        context.stroke();
       }
 
-      // paddle
-      ctx.fillStyle = "#38bdf8";
-      ctx.shadowColor = "#38bdf8";
-      ctx.shadowBlur = 16;
-      ctx.fillRect(
+      context.fillStyle =
+        "#38bdf8";
+
+      context.shadowColor =
+        "#38bdf8";
+
+      context.shadowBlur = 16;
+
+      context.fillRect(
         paddleX,
-        height - paddleMarginBottom - paddleHeight,
+        height -
+          paddleMarginBottom -
+          paddleHeight,
         paddleWidth,
         paddleHeight,
       );
-      ctx.shadowBlur = 0;
 
-      // ball
-      ctx.beginPath();
-      ctx.arc(ballX, ballY, ballRadius, 0, Math.PI * 2);
-      ctx.fillStyle = "#f97316";
-      ctx.shadowColor = "#f97316";
-      ctx.shadowBlur = 18;
-      ctx.fill();
-      ctx.closePath();
-      ctx.shadowBlur = 0;
+      context.shadowBlur = 0;
 
-      // starfield
-      ctx.fillStyle = "rgba(148,163,184,0.4)";
-      for (let i = 0; i < 16; i++) {
-        const sx = (i * 23) % width;
-        const sy = (i * 53 + (now / 35) % height) % height;
-        ctx.fillRect(sx, sy, 1, 1);
+      context.beginPath();
+
+      context.arc(
+        ballX,
+        ballY,
+        ballRadius,
+        0,
+        Math.PI * 2,
+      );
+
+      context.fillStyle =
+        "#f97316";
+
+      context.shadowColor =
+        "#f97316";
+
+      context.shadowBlur = 18;
+
+      context.fill();
+
+      context.closePath();
+
+      context.shadowBlur = 0;
+
+      context.fillStyle =
+        "rgba(148,163,184,0.4)";
+
+      for (
+        let index = 0;
+        index < 16;
+        index += 1
+      ) {
+        const starX =
+          (index * 23) %
+          width;
+
+        const starY =
+          (index * 53 +
+            (now / 35) %
+              height) %
+          height;
+
+        context.fillRect(
+          starX,
+          starY,
+          1,
+          1,
+        );
       }
 
-      animationRef.current = requestAnimationFrame(drawFrame);
+      animationRef.current =
+        requestAnimationFrame(
+          drawFrame,
+        );
     };
 
-    animationRef.current = requestAnimationFrame(drawFrame);
+    animationRef.current =
+      requestAnimationFrame(
+        drawFrame,
+      );
 
     return () => {
-      if (animationRef.current != null) cancelAnimationFrame(animationRef.current);
+      if (
+        animationRef.current !==
+        null
+      ) {
+        cancelAnimationFrame(
+          animationRef.current,
+        );
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function startGameIfNeeded() {
-    const state = gameStateRef.current;
-    if (!state) return;
+    const state =
+      gameStateRef.current;
 
-    if (!state.running && !state.gameOver) {
-      gameStateRef.current = { ...state, running: true };
+    if (!state) {
+      return;
+    }
+
+    if (
+      !state.running &&
+      !state.gameOver
+    ) {
+      gameStateRef.current = {
+        ...state,
+        running: true,
+      };
+
       setIsRunning(true);
-      timerStartRef.current = performance.now();
+
+      timerStartRef.current =
+        performance.now();
     }
   }
 
   function handlePointerMove(
-    e: React.PointerEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>,
+    event:
+      | React.PointerEvent<HTMLDivElement>
+      | React.MouseEvent<HTMLDivElement>,
   ) {
-    const state = gameStateRef.current;
-    if (!state) return;
+    const state =
+      gameStateRef.current;
 
-    const container = e.currentTarget.getBoundingClientRect();
-    const relativeX = e.clientX - container.left;
-    const scaleX = CONFIG.width / container.width;
-
-    const paddleCenterX = relativeX * scaleX;
-    let newPaddleX = paddleCenterX - CONFIG.paddleWidth / 2;
-
-    if (newPaddleX < 0) newPaddleX = 0;
-    if (newPaddleX + CONFIG.paddleWidth > CONFIG.width) {
-      newPaddleX = CONFIG.width - CONFIG.paddleWidth;
+    if (!state) {
+      return;
     }
 
-    gameStateRef.current = { ...state, paddleX: newPaddleX };
+    const container =
+      event.currentTarget.getBoundingClientRect();
 
-    if (!state.gameOver) startGameIfNeeded();
+    const relativeX =
+      event.clientX -
+      container.left;
+
+    const scaleX =
+      CONFIG.width /
+      container.width;
+
+    const paddleCenterX =
+      relativeX * scaleX;
+
+    let nextPaddleX =
+      paddleCenterX -
+      CONFIG.paddleWidth / 2;
+
+    if (nextPaddleX < 0) {
+      nextPaddleX = 0;
+    }
+
+    if (
+      nextPaddleX +
+        CONFIG.paddleWidth >
+      CONFIG.width
+    ) {
+      nextPaddleX =
+        CONFIG.width -
+        CONFIG.paddleWidth;
+    }
+
+    gameStateRef.current = {
+      ...state,
+      paddleX: nextPaddleX,
+    };
+
+    if (!state.gameOver) {
+      startGameIfNeeded();
+    }
   }
 
   function handleReset() {
@@ -332,53 +703,120 @@ export function GalaxyPaddleGame({
   }
 
   async function handleSubmitCompletion() {
-    if (submitting || !gameOver) return;
+    if (
+      submitting ||
+      !gameOver
+    ) {
+      return;
+    }
 
-    // Guest mode: allow play, but no XP / quest logging
-    if (isGuest || !userId) {
-      setSubmitError(
-        "You’re playing as a guest. Sign in on the BitGalaxy dashboard to log XP and quest progress.",
+    if (
+      isGuest ||
+      !memberId
+    ) {
+      setSubmitError(null);
+
+      setSubmitMessage(
+        "Guest run complete. XP and official Galaxy Paddle records are not saved in guest mode.",
       );
-      setSubmitSuccess(false);
+
       return;
     }
 
     setSubmitting(true);
     setSubmitError(null);
+    setSubmitMessage(null);
 
     try {
-      const res = await fetch("/api/bitgalaxy/quests/complete-galaxy-paddle", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          orgId,
-          userId,
-          questId: "galaxy-paddle",
-          level: tier,
-          stats: {
-            hits,
-            timeMs: Math.round(elapsedMs),
-            maxSpeed,
-          },
-        }),
-      });
+      const response = await fetch(
+        "/api/bitgalaxy/quests/complete-galaxy-paddle",
+        {
+          method: "POST",
 
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}));
-        throw new Error(json.error || "Failed to sync completion.");
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+
+          credentials: "include",
+
+          body: JSON.stringify({
+            orgId,
+            memberId,
+
+            level: tier,
+
+            stats: {
+              hits,
+
+              timeMs: Math.max(
+                1,
+                Math.round(
+                  elapsedMs,
+                ),
+              ),
+
+              maxSpeed,
+            },
+          }),
+        },
+      );
+
+      const json = (await response
+        .json()
+        .catch(() => ({}))) as GalaxyPaddleCompletionResponse;
+
+      if (
+        !response.ok ||
+        !json.success
+      ) {
+        throw new Error(
+          json.error ||
+            "Failed to sync Galaxy Paddle completion.",
+        );
       }
 
-      setSubmitSuccess(true);
+      const xpAwarded =
+        json.result?.xpAwarded ??
+        0;
 
-      setTimeout(() => {
-        const params = new URLSearchParams({ orgId, userId });
-        router.push(`/bitgalaxy?${params.toString()}`);
-      }, 900);
-    } catch (err: any) {
-      console.error("Galaxy Paddle completion error:", err);
+      const statsImproved =
+        json.result
+          ?.statsImproved === true;
+
+      const submittedLevel =
+        json.result
+          ?.submittedLevel ??
+        tier;
+
+      if (xpAwarded > 0) {
+        setSubmitMessage(
+          `Tier ${submittedLevel} synced. You earned ${xpAwarded} XP.`,
+        );
+      } else if (statsImproved) {
+        setSubmitMessage(
+          "New Galaxy Paddle personal best recorded. This tier’s XP was already earned for the current week.",
+        );
+      } else {
+        setSubmitMessage(
+          "Run recorded. No additional XP was available for this tier.",
+        );
+      }
+
+      window.setTimeout(() => {
+        router.push(returnHref);
+        router.refresh();
+      }, 1200);
+    } catch (error: unknown) {
+      console.error(
+        "Galaxy Paddle completion error:",
+        error,
+      );
+
       setSubmitError(
-        err?.message ||
-          "We completed locally, but couldn’t sync with the server. Staff can still verify your progress.",
+        error instanceof Error
+          ? error.message
+          : "The run completed locally, but the result could not be synchronized.",
       );
     } finally {
       setSubmitting(false);
@@ -386,48 +824,68 @@ export function GalaxyPaddleGame({
   }
 
   const submitLabel = isGuest
-    ? "Sign in to log XP"
+    ? gameOver
+      ? "Guest run complete"
+      : "Finish a run"
     : submitting
-    ? "Syncing…"
-    : gameOver
-    ? `Log Tier ${tier} & award XP`
-    : "Finish a run to log XP";
+      ? "Syncing…"
+      : gameOver
+        ? `Log Tier ${tier}`
+        : "Finish a run to log XP";
 
   return (
     <GameQuestShell
-      badgeLabel="Side Quest"
+      badgeLabel="Arcade Game"
       title="Galaxy Paddle"
       subtitle="Hold the defensive line. Keep the neon core in play as long as you can."
       orgId={orgId}
-      userId={userId ?? ""} // guests pass an empty string; shell can ignore / treat as unl inked
+      worldName={worldName}
+      memberId={memberId}
+      memberName={memberName}
+      isGuest={isGuest}
+      returnHref={returnHref}
+      returnLabel="Back to arcade"
     >
       <div className="flex flex-col gap-3 rounded-2xl border border-sky-500/40 bg-slate-950/95 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex gap-4 text-[11px]">
+        <div className="flex flex-wrap gap-4 text-[11px]">
           <div>
             <p className="text-[10px] uppercase tracking-[0.22em] text-sky-400/80">
               Time Online
             </p>
-            <p className="mt-1 font-mono text-sm text-sky-100">{seconds}s</p>
+
+            <p className="mt-1 font-mono text-sm text-sky-100">
+              {seconds}s
+            </p>
           </div>
+
           <div>
             <p className="text-[10px] uppercase tracking-[0.22em] text-sky-400/80">
               Returns
             </p>
-            <p className="mt-1 font-mono text-sm text-sky-100">{hits}</p>
+
+            <p className="mt-1 font-mono text-sm text-sky-100">
+              {hits}
+            </p>
           </div>
+
           <div>
             <p className="text-[10px] uppercase tracking-[0.22em] text-sky-400/80">
               Max Velocity
             </p>
+
             <p className="mt-1 font-mono text-sm text-sky-100">
               {maxSpeed.toFixed(1)}
             </p>
           </div>
+
           <div>
             <p className="text-[10px] uppercase tracking-[0.22em] text-sky-400/80">
               Tier
             </p>
-            <p className="mt-1 font-mono text-sm text-sky-100">{tier}</p>
+
+            <p className="mt-1 font-mono text-sm text-sky-100">
+              {tier}
+            </p>
           </div>
         </div>
 
@@ -435,11 +893,13 @@ export function GalaxyPaddleGame({
           {gameOver ? (
             <span className="inline-flex items-center gap-1 rounded-full border border-rose-400/60 bg-rose-500/10 px-3 py-1 text-rose-200">
               <span className="h-2 w-2 rounded-full bg-rose-400 shadow-[0_0_12px_rgba(248,113,113,0.8)]" />
-              Run complete — Tier {tier} ready to log
+
+              Run complete — Tier {tier}
             </span>
           ) : isRunning ? (
             <span className="inline-flex items-center gap-1 rounded-full border border-sky-400/60 bg-sky-500/10 px-3 py-1 text-sky-200">
               <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400 shadow-[0_0_12px_rgba(56,189,248,0.8)]" />
+
               Holding the line…
             </span>
           ) : (
@@ -451,7 +911,8 @@ export function GalaxyPaddleGame({
           {isGuest && (
             <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/60 bg-amber-500/10 px-3 py-1 text-amber-200">
               <span className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.9)]" />
-              Guest mode — XP won’t be logged
+
+              Guest mode
             </span>
           )}
 
@@ -483,19 +944,33 @@ export function GalaxyPaddleGame({
       </div>
 
       {submitError && (
-        <p className="mt-3 text-[11px] text-rose-300">{submitError}</p>
+        <p
+          role="alert"
+          className="mt-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200"
+        >
+          {submitError}
+        </p>
       )}
-      {submitSuccess && (
-        <p className="mt-3 text-[11px] text-emerald-300">
-          Mission synced. Updating BitGalaxy…
+
+      {submitMessage && (
+        <p
+          role="status"
+          className="mt-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200"
+        >
+          {submitMessage}
         </p>
       )}
 
       <div className="mt-4 flex justify-end">
         <button
           type="button"
-          onClick={handleSubmitCompletion}
-          disabled={submitting || !gameOver || isGuest}
+          onClick={
+            handleSubmitCompletion
+          }
+          disabled={
+            submitting ||
+            !gameOver
+          }
           className="inline-flex items-center justify-center rounded-full bg-sky-500 px-4 py-2 text-[11px] font-semibold text-slate-950 shadow-[0_0_24px_rgba(56,189,248,0.7)] transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {submitLabel}

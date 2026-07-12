@@ -1,68 +1,169 @@
-import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 
-export type AuditEventType =
+import { adminDb } from "@/lib/firebase-admin";
+
+export type BitGalaxyAuditEventType =
   | "xp"
   | "quest_start"
   | "quest_complete"
-  | "arcade_tier_complete" 
-  | "checkin"
-  | "reward_redeem"
-  | "referral";
+  | "arcade_run"
+  | "arcade_complete"
+  | "arcade_tier_complete"
+  | "checkin";
 
-export interface AuditLogEntry {
-  eventType: AuditEventType;
+export interface BitGalaxyAuditLogEntry {
+  activityId: string;
+
+  system: "bitgalaxy";
+  moduleId: "bitgalaxy";
+
+  orgId: string;
+  memberId: string;
+
+  eventType: BitGalaxyAuditEventType;
   xpChange: number | null;
+
   questId: string | null;
   rewardId: string | null;
+  gameId: string | null;
+
   source: string | null;
-  meta: Record<string, any> | null;
-  timestamp: FirebaseFirestore.FieldValue | FirebaseFirestore.Timestamp | null;
+  meta: Record<string, unknown> | null;
+
+  occurredAt: FirebaseFirestore.FieldValue;
+  createdAt: FirebaseFirestore.FieldValue;
 }
 
-interface WriteAuditLogInput {
-  eventType: AuditEventType;
-  xpChange?: number;
+export interface WriteAuditLogInput {
+  eventType: BitGalaxyAuditEventType;
+
+  xpChange?: number | null;
+
   questId?: string | null;
   rewardId?: string | null;
-  source?: string;
-  meta?: Record<string, any>;
+  gameId?: string | null;
+
+  source?: string | null;
+  meta?: Record<string, unknown>;
+}
+
+function normalizeRequiredId(
+  value: string,
+  fieldName: string,
+): string {
+  const normalized = value.trim();
+
+  if (!normalized) {
+    throw new Error(
+      `writeAuditLog: ${fieldName} is required`,
+    );
+  }
+
+  return normalized;
+}
+
+function normalizeOptionalString(
+  value: unknown,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return normalized || null;
+}
+
+function cleanMeta(
+  meta?: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (!meta) {
+    return null;
+  }
+
+  const cleaned: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(meta)) {
+    if (value !== undefined) {
+      cleaned[key] = value;
+    }
+  }
+
+  return Object.keys(cleaned).length
+    ? cleaned
+    : null;
 }
 
 export async function writeAuditLog(
   orgId: string,
-  userId: string,
+  memberId: string,
   input: WriteAuditLogInput,
 ): Promise<void> {
-  if (!orgId) throw new Error("writeAuditLog: orgId is required");
-  if (!userId) throw new Error("writeAuditLog: userId is required");
+  const normalizedOrgId = normalizeRequiredId(
+    orgId,
+    "orgId",
+  );
+
+  const normalizedMemberId = normalizeRequiredId(
+    memberId,
+    "memberId",
+  );
+
+  if (!input?.eventType) {
+    throw new Error(
+      "writeAuditLog: eventType is required",
+    );
+  }
+
+  if (
+    input.xpChange !== undefined &&
+    input.xpChange !== null &&
+    !Number.isFinite(input.xpChange)
+  ) {
+    throw new Error(
+      "writeAuditLog: xpChange must be a finite number or null",
+    );
+  }
+
+  const activityRef = adminDb
+    .collection("activities")
+    .doc();
 
   const now = FieldValue.serverTimestamp();
 
-  const historyRef = adminDb
-    .collection("orgs")
-    .doc(orgId)
-    .collection("bitgalaxyPlayers")
-    .doc(userId)
-    .collection("history")
-    .doc();
+  const entry: BitGalaxyAuditLogEntry = {
+    activityId: activityRef.id,
 
-  const cleanedMeta: Record<string, any> = {};
-  if (input.meta) {
-    for (const [key, value] of Object.entries(input.meta)) {
-      if (value !== undefined) cleanedMeta[key] = value;
-    }
-  }
+    system: "bitgalaxy",
+    moduleId: "bitgalaxy",
 
-  const entry: AuditLogEntry = {
+    orgId: normalizedOrgId,
+    memberId: normalizedMemberId,
+
     eventType: input.eventType,
-    xpChange: input.xpChange ?? null,
-    questId: input.questId ?? null,
-    rewardId: input.rewardId ?? null,
-    source: input.source ?? null,
-    meta: Object.keys(cleanedMeta).length ? cleanedMeta : null,
-    timestamp: now,
+    xpChange:
+      typeof input.xpChange === "number"
+        ? input.xpChange
+        : null,
+
+    questId: normalizeOptionalString(
+      input.questId,
+    ),
+    rewardId: normalizeOptionalString(
+      input.rewardId,
+    ),
+    gameId: normalizeOptionalString(
+      input.gameId,
+    ),
+
+    source: normalizeOptionalString(
+      input.source,
+    ),
+    meta: cleanMeta(input.meta),
+
+    occurredAt: now,
+    createdAt: now,
   };
 
-  await historyRef.set(entry);
+  await activityRef.set(entry);
 }

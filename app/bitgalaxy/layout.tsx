@@ -29,7 +29,7 @@ export default function BitGalaxyLayout({ children }: { children: ReactNode }) {
             {/* top chrome bar */}
             <div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-800/80 bg-slate-950/80 px-4 py-2 text-[11px] text-slate-300 shadow-[0_0_40px_rgba(15,23,42,0.9)]">
               {/* LEFT SIDE — Logo/Home Link */}
-              <Link href="/bitgalaxy">
+              <Link href="/bitgalaxy/games">
                 <div className="inline-flex cursor-pointer items-center gap-2 transition hover:text-sky-300">
                   <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.9)]" />
                   <span className="font-semibold tracking-[0.18em] text-slate-100">
@@ -42,7 +42,7 @@ export default function BitGalaxyLayout({ children }: { children: ReactNode }) {
               <div className="flex items-center gap-3">
                 {/* Home icon */}
                 <Link
-                  href="/bitgalaxy"
+                  href="/bitgalaxy/games"
                   className="rounded-full p-1 text-slate-300 transition hover:bg-slate-800 hover:text-sky-300"
                 >
                   <Home size={16} strokeWidth={2} />

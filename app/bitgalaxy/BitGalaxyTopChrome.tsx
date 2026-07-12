@@ -11,7 +11,7 @@ export function BitGalaxyTopChrome() {
   // If a player is selected, keep ?userId= in all BitGalaxy links
   const query = userId ? `?userId=${encodeURIComponent(userId)}` : "";
 
-  const homeHref = `/bitgalaxy${query}`;
+  const homeHref = `/bitgalaxy/games${query}`;
   const notificationsHref = `/bitgalaxy/notifications${query}`;
   const gamesHref = `/bitgalaxy/games${query}`;
 

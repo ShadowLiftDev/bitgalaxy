@@ -1,63 +1,320 @@
 import { NextRequest, NextResponse } from "next/server";
+
 import { adminDb } from "@/lib/firebase-admin";
-import { mintPlayerSession, PLAYER_SESSION_COOKIE } from "@/lib/bitgalaxy/playerSession";
+import {
+  mintPlayerSession,
+  PLAYER_SESSION_COOKIE,
+} from "@/lib/bitgalaxy/playerSession";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-type Body = {
-  orgId: string;
+type LookupPlayerBody = {
+  orgId?: string;
   email?: string;
   phone?: string;
 };
 
-function normalizeEmail(email?: string) {
-  const e = (email ?? "").trim().toLowerCase();
-  return e || null;
+type MemberMatch = {
+  memberId: string;
+  displayName: string;
+};
+
+type MemberLookupField =
+  | "emailNormalized"
+  | "email"
+  | "phoneE164"
+  | "phoneDigits"
+  | "phoneNormalized"
+  | "phone";
+
+function normalizeEmail(value?: string): string | null {
+  const normalized = value?.trim().toLowerCase() ?? "";
+
+  return normalized || null;
 }
 
-function phoneDigitsAll(phone?: string) {
-  const digits = (phone ?? "").replace(/[^\d]/g, "");
+function normalizePhoneDigits(value?: string): string | null {
+  const digits = value?.replace(/\D/g, "") ?? "";
+
   return digits || null;
 }
 
-function last10(digits?: string | null) {
-  if (!digits) return null;
-  return digits.length > 10 ? digits.slice(-10) : digits;
+function getLastTenDigits(value?: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  return value.length > 10 ? value.slice(-10) : value;
 }
 
-function e164USFromDigits(digits?: string | null) {
-  if (!digits) return null;
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+function toUsE164(value?: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  if (value.length === 10) {
+    return `+1${value}`;
+  }
+
+  if (value.length === 11 && value.startsWith("1")) {
+    return `+${value}`;
+  }
+
   return null;
 }
 
-function setPlayerSessionCookie(res: NextResponse, orgId: string, userId: string) {
-  res.cookies.set({
+function normalizeDisplayName(
+  memberId: string,
+  data: FirebaseFirestore.DocumentData,
+): string {
+  const candidates = [
+    data.displayName,
+    data.name,
+    data.fullName,
+    data.firstName && data.lastName
+      ? `${String(data.firstName)} ${String(data.lastName)}`
+      : null,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+
+    const normalized = candidate.trim();
+
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return `Member ${memberId.slice(0, 6)}`;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value?.trim() ?? "")
+        .filter(Boolean),
+    ),
+  );
+}
+
+function setPlayerSessionCookie(
+  response: NextResponse,
+  orgId: string,
+  memberId: string,
+) {
+  response.cookies.set({
     name: PLAYER_SESSION_COOKIE.name,
-    value: mintPlayerSession(orgId, userId),
+    value: mintPlayerSession(orgId, memberId),
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
     maxAge: PLAYER_SESSION_COOKIE.maxAgeSeconds,
-    // domain: ".yourdomain.com", // only if you want cross-subdomain app sharing
   });
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    const body = (await req.json()) as Partial<Body>;
+async function memberHasOrgLink(
+  memberId: string,
+  orgId: string,
+): Promise<boolean> {
+  const orgLinkSnap = await adminDb
+    .collection("members")
+    .doc(memberId)
+    .collection("orgLinks")
+    .doc(orgId)
+    .get();
 
-    const orgId = body.orgId?.trim();
+  return orgLinkSnap.exists;
+}
+
+async function findConnectedMemberByField(
+  orgId: string,
+  field: MemberLookupField,
+  value: string,
+): Promise<MemberMatch | null> {
+  const snapshot = await adminDb
+    .collection("members")
+    .where(field, "==", value)
+    .limit(10)
+    .get();
+
+  if (snapshot.empty) {
+    return null;
+  }
+
+  for (const memberDoc of snapshot.docs) {
+    const belongsToOrg = await memberHasOrgLink(memberDoc.id, orgId);
+
+    if (!belongsToOrg) {
+      continue;
+    }
+
+    const data = memberDoc.data();
+
+    return {
+      memberId: memberDoc.id,
+      displayName: normalizeDisplayName(memberDoc.id, data),
+    };
+  }
+
+  return null;
+}
+
+async function findConnectedMemberByEmail(
+  orgId: string,
+  email: string,
+): Promise<MemberMatch | null> {
+  const emailLookups: Array<{
+    field: MemberLookupField;
+    value: string;
+  }> = [
+    {
+      field: "emailNormalized",
+      value: email,
+    },
+    {
+      field: "email",
+      value: email,
+    },
+  ];
+
+  for (const lookup of emailLookups) {
+    const match = await findConnectedMemberByField(
+      orgId,
+      lookup.field,
+      lookup.value,
+    );
+
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+async function findConnectedMemberByPhone(
+  orgId: string,
+  phoneRaw: string,
+): Promise<MemberMatch | null> {
+  const digitsAll = normalizePhoneDigits(phoneRaw);
+  const digits10 = getLastTenDigits(digitsAll);
+  const e164 =
+    toUsE164(digitsAll) ??
+    (digits10 ? `+1${digits10}` : null);
+
+  const normalizedRawPhone = phoneRaw.trim();
+
+  const lookupValues: Array<{
+    field: MemberLookupField;
+    value: string;
+  }> = [];
+
+  for (const value of uniqueStrings([e164])) {
+    lookupValues.push({
+      field: "phoneE164",
+      value,
+    });
+  }
+
+  for (const value of uniqueStrings([digits10, digitsAll])) {
+    lookupValues.push({
+      field: "phoneDigits",
+      value,
+    });
+  }
+
+  for (const value of uniqueStrings([
+    digits10,
+    digitsAll,
+    e164,
+  ])) {
+    lookupValues.push({
+      field: "phoneNormalized",
+      value,
+    });
+  }
+
+  for (const value of uniqueStrings([
+    e164,
+    normalizedRawPhone.startsWith("+")
+      ? normalizedRawPhone
+      : null,
+    digits10,
+    digitsAll,
+    normalizedRawPhone,
+  ])) {
+    lookupValues.push({
+      field: "phone",
+      value,
+    });
+  }
+
+  for (const lookup of lookupValues) {
+    const match = await findConnectedMemberByField(
+      orgId,
+      lookup.field,
+      lookup.value,
+    );
+
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+function createMemberFoundResponse(
+  orgId: string,
+  member: MemberMatch,
+): NextResponse {
+  const response = NextResponse.json({
+    success: true,
+    memberId: member.memberId,
+    member: {
+      memberId: member.memberId,
+      displayName: member.displayName,
+    },
+  });
+
+  setPlayerSessionCookie(response, orgId, member.memberId);
+
+  return response;
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = (await request
+      .json()
+      .catch(() => null)) as LookupPlayerBody | null;
+
+    if (!body) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "A valid JSON request body is required.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const orgId = body.orgId?.trim() ?? "";
     const email = normalizeEmail(body.email);
-    const phoneRaw = (body.phone ?? "").trim();
+    const phoneRaw = body.phone?.trim() ?? "";
 
     if (!orgId) {
       return NextResponse.json(
-        { success: false, error: "Missing orgId" },
+        {
+          success: false,
+          error: "Missing orgId.",
+        },
         { status: 400 },
       );
     }
@@ -66,82 +323,49 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: "Provide either an email or a phone number to look up a player.",
+          error:
+            "Provide either an email or phone number to locate your member profile.",
         },
         { status: 400 },
       );
     }
 
-    const playersRef = adminDb
-      .collection("orgs")
-      .doc(orgId)
-      .collection("bitgalaxyPlayers");
-
-    // 1) Email lookup
-    if (email) {
-      const snap = await playersRef.where("email", "==", email).limit(1).get();
-      if (!snap.empty) {
-        const userId = snap.docs[0].id;
-        const res = NextResponse.json({ success: true, userId });
-        setPlayerSessionCookie(res, orgId, userId);
-        return res;
-      }
+    if (email && phoneRaw) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Provide either an email or phone number, but not both.",
+        },
+        { status: 400 },
+      );
     }
 
-    // 2) Phone lookup
-    if (phoneRaw) {
-      const digitsAll = phoneDigitsAll(phoneRaw);
-      const digits10 = last10(digitsAll);
-      const e164 =
-        e164USFromDigits(digitsAll) || (digits10 ? `+1${digits10}` : null);
+    const member = email
+      ? await findConnectedMemberByEmail(orgId, email)
+      : await findConnectedMemberByPhone(orgId, phoneRaw);
 
-      const candidates: Array<string> = [
-        e164,
-        phoneRaw.startsWith("+") ? phoneRaw : null,
-        digits10,
-        phoneRaw,
-      ].filter(Boolean) as string[];
-
-      for (const value of candidates) {
-        const snap = await playersRef.where("phone", "==", value).limit(1).get();
-        if (!snap.empty) {
-          const userId = snap.docs[0].id;
-          const res = NextResponse.json({ success: true, userId });
-          setPlayerSessionCookie(res, orgId, userId);
-          return res;
-        }
-      }
-
-      // Optional mixed-schema attempts
-      const altCandidates: Array<{ field: string; value: string | null }> = [
-        { field: "phoneNormalized", value: digits10 },
-        { field: "phoneDigits", value: digits10 },
-      ];
-
-      for (const c of altCandidates) {
-        if (!c.value) continue;
-        const snap = await playersRef.where(c.field, "==", c.value).limit(1).get();
-        if (!snap.empty) {
-          const userId = snap.docs[0].id;
-          const res = NextResponse.json({ success: true, userId });
-          setPlayerSessionCookie(res, orgId, userId);
-          return res;
-        }
-      }
+    if (!member) {
+      return NextResponse.json(
+        {
+          success: false,
+          code: "MEMBER_NOT_FOUND",
+          error:
+            "No member connected to this organization was found with that email or phone number.",
+        },
+        { status: 404 },
+      );
     }
+
+    return createMemberFoundResponse(orgId, member);
+  } catch (error: unknown) {
+    console.error("[bitgalaxy:lookup-player:POST]", error);
 
     return NextResponse.json(
       {
         success: false,
-        error:
-          "No BitGalaxy player found with that email/phone in this world. Ask staff to confirm which contact info is on file.",
+        error: "Unexpected error locating your member profile.",
       },
-      { status: 404 },
-    );
-  } catch (err: any) {
-    console.error("BitGalaxy lookup-player error:", err);
-    return NextResponse.json(
-      { success: false, error: "Unexpected error looking up player." },
       { status: 500 },
     );
   }

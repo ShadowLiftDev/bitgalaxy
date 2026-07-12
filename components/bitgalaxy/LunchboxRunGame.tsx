@@ -1,20 +1,46 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
-type Props = {
+import { GameQuestShell } from "./GameQuestShell";
+
+type LunchboxRunGameProps = {
   orgId: string;
-  userId: string | null; // null in guest mode
+  worldName: string;
+  memberId: string | null;
+  memberName?: string | null;
   isGuest: boolean;
 };
 
 type GameState = "ready" | "running" | "gameover";
 
+type CollisionBox = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
+type LunchboxRunCompletionResponse = {
+  success?: boolean;
+  error?: string;
+  result?: {
+    submittedLevel?: number;
+    weeklyBestLevel?: number;
+    weeklyBestScore?: number;
+    xpAwarded?: number;
+    statsImproved?: boolean;
+    bestScore?: number | null;
+    runs?: number;
+  };
+};
+
 function randRange(a: number, b: number) {
   return a + Math.random() * (b - a);
 }
 
-function aabb(a: { x: number; y: number; w: number; h: number }, b: any) {
+function aabb(a: CollisionBox, b: CollisionBox) {
   return (
     a.x < b.x + b.w &&
     a.x + a.w > b.x &&
@@ -34,6 +60,7 @@ function roundRect(
   stroke: boolean,
 ) {
   const rr = Math.min(r, w / 2, h / 2);
+
   ctx.beginPath();
   ctx.moveTo(x + rr, y);
   ctx.arcTo(x + w, y, x + w, y + h, rr);
@@ -41,6 +68,7 @@ function roundRect(
   ctx.arcTo(x, y + h, x, y, rr);
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
+
   if (fill) ctx.fill();
   if (stroke) ctx.stroke();
 }
@@ -60,36 +88,60 @@ function glowLine(
   ctx.lineWidth = width;
   ctx.shadowBlur = blur;
   ctx.shadowColor = color;
+
   ctx.beginPath();
   ctx.moveTo(x1, y1);
   ctx.lineTo(x2, y2);
   ctx.stroke();
+
   ctx.restore();
 }
 
-export function LunchboxRunGame({ orgId, userId, isGuest }: Props) {
+function buildReturnHref({
+  orgId,
+  memberId,
+  isGuest,
+}: {
+  orgId: string;
+  memberId: string | null;
+  isGuest: boolean;
+}) {
+  const params = new URLSearchParams({ orgId });
+
+  if (isGuest) {
+    params.set("guest", "1");
+  } else if (memberId) {
+    params.set("memberId", memberId);
+  }
+
+  return `/bitgalaxy/games?${params.toString()}`;
+}
+
+export function LunchboxRunGame({
+  orgId,
+  worldName,
+  memberId,
+  memberName = null,
+  isGuest,
+}: LunchboxRunGameProps) {
+  const router = useRouter();
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
-  const [uiState, setUiState] = useState<GameState>("ready");
   const uiStateRef = useRef<GameState>("ready");
-
   const spriteRef = useRef<HTMLImageElement | null>(null);
+  const hiRef = useRef(0);
+  const submissionStartedRef = useRef(false);
+
+  const [uiState, setUiState] = useState<GameState>("ready");
   const [spriteReady, setSpriteReady] = useState(false);
-
   const [score, setScore] = useState(0);
-
   const [hi, setHi] = useState(0);
 
-useEffect(() => {
-  if (typeof window === "undefined") return;
-  const v = window.localStorage.getItem("bg_lunchbox_run_hi");
-  const n = v ? Number(v) : 0;
-  setHi(Number.isFinite(n) ? n : 0);
-}, []);
-
   const [submitting, setSubmitting] = useState(false);
-  const [submitMsg, setSubmitMsg] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitMessage, setSubmitMessage] = useState<string | null>(null);
 
   const cfg = useMemo(
     () => ({
@@ -100,7 +152,7 @@ useEffect(() => {
       gravity: 2900,
       jumpVel: 963,
 
-      baseSpeed: 350, // slow start
+      baseSpeed: 350,
       maxSpeed: 1500,
 
       speedupMinS: 6,
@@ -111,7 +163,6 @@ useEffect(() => {
       obstacleBaseGap: 325,
       obstacleGapScale: 0.25,
 
-      // fair hitbox
       hitInsetX: 12,
       hitInsetY: 15,
       hitInsetW: 22,
@@ -120,14 +171,29 @@ useEffect(() => {
     [],
   );
 
+  const returnHref = buildReturnHref({
+    orgId,
+    memberId,
+    isGuest,
+  });
+
   function setState(next: GameState) {
     uiStateRef.current = next;
     setUiState(next);
   }
 
-  // Load Lenny sprite
+  useEffect(() => {
+    const storedValue = window.localStorage.getItem("bg_lunchbox_run_hi");
+    const parsedValue = storedValue ? Number(storedValue) : 0;
+    const nextValue = Number.isFinite(parsedValue) ? parsedValue : 0;
+
+    hiRef.current = nextValue;
+    setHi(nextValue);
+  }, []);
+
   useEffect(() => {
     const img = new Image();
+
     img.src = "/bitgalaxy/sprites/lenny.png";
 
     img.onload = () => {
@@ -148,103 +214,105 @@ useEffect(() => {
 
     const ctxMaybe = canvas.getContext("2d");
     if (!ctxMaybe) return;
+
     const ctx: CanvasRenderingContext2D = ctxMaybe;
 
-    const view = { w: cfg.width, h: cfg.height, sx: 1, sy: 1 };
+    const view = {
+      w: cfg.width,
+      h: cfg.height,
+      sx: 1,
+      sy: 1,
+    };
 
     function isMobileView() {
-  // based on actual rendered canvas width
-  return view.w < 520; // tweak threshold if you want
-}
+      return view.w < 520;
+    }
 
-// base player dimensions (your “desktop design”)
-const BASE_PLAYER = { x: 120, w: 50, h: 50 };
+    const BASE_PLAYER = {
+      x: 120,
+      w: 50,
+      h: 50,
+    };
 
-
-const player = {
-  x: BASE_PLAYER.x,
-  y: cfg.groundY,
-  w: BASE_PLAYER.w,
-  h: BASE_PLAYER.h,
-  vy: 0,
-  onGround: true, 
-};
+    const player = {
+      x: BASE_PLAYER.x,
+      y: cfg.groundY,
+      w: BASE_PLAYER.w,
+      h: BASE_PLAYER.h,
+      vy: 0,
+      onGround: true,
+    };
 
     function resizeCanvas() {
-  const canvasEl = canvasRef.current;
-if (!canvasEl) return;
+      const canvasEl = canvasRef.current;
+      if (!canvasEl) return;
 
-const ctxMaybe = canvasEl.getContext("2d");
-if (!ctxMaybe) return;
+      const context = canvasEl.getContext("2d");
+      if (!context) return;
 
-  const parent = canvasEl.parentElement as HTMLElement | null;
+      const parent = canvasEl.parentElement;
+      const cssW = parent ? parent.clientWidth : cfg.width;
+      const cssH = Math.round(cssW * (cfg.height / cfg.width));
 
-const ctx: CanvasRenderingContext2D = ctxMaybe;
-  const cssW = parent ? parent.clientWidth : cfg.width;
+      const dpr = Math.max(
+        1,
+        Math.min(2, window.devicePixelRatio || 1),
+      );
 
-  // Keep your native aspect ratio (960×320 = 3:1)
-  const cssH = Math.round(cssW * (cfg.height / cfg.width));
+      canvasEl.width = Math.floor(cssW * dpr);
+      canvasEl.height = Math.floor(cssH * dpr);
 
-  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-  canvasEl.width = Math.floor(cssW * dpr);
-  canvasEl.height = Math.floor(cssH * dpr);
+      canvasEl.style.width = `${cssW}px`;
+      canvasEl.style.height = `${cssH}px`;
 
-  // Let CSS control displayed size
-  canvasEl.style.width = `${cssW}px`;
- canvasEl.style.height = `${cssH}px`;
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // Make 1 unit in code = 1 CSS pixel
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      view.w = cssW;
+      view.h = cssH;
 
-  // IMPORTANT: update cfg-like values you use for drawing
-  view.w = cssW;
-  view.h = cssH;
+      if (isMobileView()) {
+        player.w = Math.round(BASE_PLAYER.w * 0.82);
+        player.h = Math.round(BASE_PLAYER.h * 0.82);
+        player.x = Math.round(BASE_PLAYER.x * 0.78);
+      } else {
+        player.w = BASE_PLAYER.w;
+        player.h = BASE_PLAYER.h;
+        player.x = BASE_PLAYER.x;
+      }
 
-  // apply mobile sizing/positioning AFTER view.w is known
-  if (isMobileView()) {
-    player.w = Math.round(BASE_PLAYER.w * 0.82);
-    player.h = Math.round(BASE_PLAYER.h * 0.82);
-    player.x = Math.round(BASE_PLAYER.x * 0.78);
-  } else {
-    player.w = BASE_PLAYER.w;
-    player.h = BASE_PLAYER.h;
-    player.x = BASE_PLAYER.x;
-  }
+      view.sx = cssW / cfg.width;
+      view.sy = cssH / cfg.height;
+    }
 
-  // Scale your game coordinates from the base design size to the view size
-  view.sx = cssW / cfg.width;
-  view.sy = cssH / cfg.height;
-}
+    resizeCanvas();
+    window.addEventListener("resize", resizeCanvas);
 
-resizeCanvas();
-window.addEventListener("resize", resizeCanvas);
-
-    // -------- internal game state --------
     let raf = 0;
     let last = performance.now();
 
-    let t = 0;
     let runTime = 0;
-    let motionTime = 0; // advances only while RUNNING
+    let motionTime = 0;
 
     let internalScore = 0;
     let speed = cfg.baseSpeed;
 
-    let nextSpeedUpAt = randRange(cfg.speedupMinS, cfg.speedupMaxS);
-    let speedupsCount = 0;
+    let nextSpeedUpAt = randRange(
+      cfg.speedupMinS,
+      cfg.speedupMaxS,
+    );
 
+    let speedupsCount = 0;
     let jumps = 0;
     let runStartMs = 0;
 
     const groundLineY = () => cfg.groundY + player.h;
 
-    // ---------------- Clouds ----------------
     type Cloud = {
       x: number;
       y: number;
       w: number;
       h: number;
-      speed: number; // px/sec
+      speed: number;
       alpha: number;
       glow: "cyan" | "pink" | "white";
     };
@@ -254,16 +322,25 @@ window.addEventListener("resize", resizeCanvas);
     function spawnCloud(seedX?: number) {
       const w = randRange(70, 170);
       const h = randRange(22, 55);
-      const y = randRange(30, Math.max(40, groundLineY() - 140)); // stay above ground line
+      const y = randRange(
+        30,
+        Math.max(40, groundLineY() - 140),
+      );
+
       const cSpeed = randRange(18, 45);
       const alpha = randRange(0.12, 0.28);
 
       const glowRoll = Math.random();
+
       const glow: Cloud["glow"] =
-        glowRoll < 0.45 ? "cyan" : glowRoll < 0.85 ? "pink" : "white";
+        glowRoll < 0.45
+          ? "cyan"
+          : glowRoll < 0.85
+            ? "pink"
+            : "white";
 
       clouds.push({
-        x: seedX ?? (cfg.width + randRange(10, 180)),
+        x: seedX ?? cfg.width + randRange(10, 180),
         y,
         w,
         h,
@@ -273,45 +350,88 @@ window.addEventListener("resize", resizeCanvas);
       });
     }
 
-    function drawCloudShape(x: number, y: number, w: number, h: number) {
+    function drawCloudShape(
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+    ) {
       const r1 = h * 0.55;
       const r2 = h * 0.45;
       const r3 = h * 0.5;
 
       ctx.beginPath();
-      ctx.arc(x + w * 0.25, y + h * 0.6, r1, Math.PI * 0.9, Math.PI * 2.1);
-      ctx.arc(x + w * 0.45, y + h * 0.4, r2, Math.PI * 1.0, Math.PI * 2.2);
-      ctx.arc(x + w * 0.68, y + h * 0.58, r3, Math.PI * 0.9, Math.PI * 2.1);
+
+      ctx.arc(
+        x + w * 0.25,
+        y + h * 0.6,
+        r1,
+        Math.PI * 0.9,
+        Math.PI * 2.1,
+      );
+
+      ctx.arc(
+        x + w * 0.45,
+        y + h * 0.4,
+        r2,
+        Math.PI,
+        Math.PI * 2.2,
+      );
+
+      ctx.arc(
+        x + w * 0.68,
+        y + h * 0.58,
+        r3,
+        Math.PI * 0.9,
+        Math.PI * 2.1,
+      );
+
       ctx.closePath();
     }
 
     function drawClouds() {
-      for (const c of clouds) {
+      for (const cloud of clouds) {
         let glowColor = "rgba(234,246,255,0.65)";
-        if (c.glow === "cyan") glowColor = "rgba(102,204,255,0.70)";
-        if (c.glow === "pink") glowColor = "rgba(255,80,200,0.65)";
+
+        if (cloud.glow === "cyan") {
+          glowColor = "rgba(102,204,255,0.70)";
+        }
+
+        if (cloud.glow === "pink") {
+          glowColor = "rgba(255,80,200,0.65)";
+        }
 
         ctx.save();
-        ctx.globalAlpha = c.alpha;
-
+        ctx.globalAlpha = cloud.alpha;
         ctx.shadowBlur = 22;
         ctx.shadowColor = glowColor;
         ctx.fillStyle = glowColor;
 
-        drawCloudShape(c.x, c.y, c.w, c.h);
+        drawCloudShape(
+          cloud.x,
+          cloud.y,
+          cloud.w,
+          cloud.h,
+        );
+
         ctx.fill();
 
         ctx.shadowBlur = 0;
-        ctx.globalAlpha = c.alpha * 0.45;
+        ctx.globalAlpha = cloud.alpha * 0.45;
         ctx.fillStyle = "rgba(255,255,255,0.75)";
-        drawCloudShape(c.x + 6, c.y + 3, c.w - 12, c.h - 8);
-        ctx.fill();
 
+        drawCloudShape(
+          cloud.x + 6,
+          cloud.y + 3,
+          cloud.w - 12,
+          cloud.h - 8,
+        );
+
+        ctx.fill();
         ctx.restore();
       }
     }
 
-    // ---------------- Stars ----------------
     const stars = Array.from({ length: 90 }).map(() => ({
       x: Math.random() * cfg.width,
       y: Math.random() * Math.max(20, groundLineY() - 70),
@@ -321,31 +441,56 @@ window.addEventListener("resize", resizeCanvas);
     }));
 
     function drawStars() {
-      for (const s of stars) {
-        // use motionTime so READY is still
-        const tw = 0.25 * Math.sin(motionTime * s.tw) + 0.75;
-        ctx.globalAlpha = Math.min(1, Math.max(0, s.a * tw));
+      for (const star of stars) {
+        const twinkle =
+          0.25 * Math.sin(motionTime * star.tw) + 0.75;
+
+        ctx.globalAlpha = Math.min(
+          1,
+          Math.max(0, star.a * twinkle),
+        );
+
         ctx.fillStyle = "rgba(234,246,255,1)";
         ctx.beginPath();
-        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
         ctx.fill();
       }
+
       ctx.globalAlpha = 1;
     }
 
-    // ---------------- Background ----------------
     function drawSkyAndGround() {
-      const sky = ctx.createLinearGradient(0, 0, 0, groundLineY());
+      const sky = ctx.createLinearGradient(
+        0,
+        0,
+        0,
+        groundLineY(),
+      );
+
       sky.addColorStop(0, "rgba(6, 6, 18, 1)");
       sky.addColorStop(1, "rgba(12, 8, 30, 1)");
+
       ctx.fillStyle = sky;
       ctx.fillRect(0, 0, cfg.width, groundLineY());
 
-      const floor = ctx.createLinearGradient(0, groundLineY(), 0, cfg.height);
+      const floor = ctx.createLinearGradient(
+        0,
+        groundLineY(),
+        0,
+        cfg.height,
+      );
+
       floor.addColorStop(0, "rgba(4, 4, 12, 1)");
       floor.addColorStop(1, "rgba(1, 1, 6, 1)");
+
       ctx.fillStyle = floor;
-      ctx.fillRect(0, groundLineY(), cfg.width, cfg.height - groundLineY());
+
+      ctx.fillRect(
+        0,
+        groundLineY(),
+        cfg.width,
+        cfg.height - groundLineY(),
+      );
     }
 
     function drawGroundLine() {
@@ -362,16 +507,23 @@ window.addEventListener("resize", resizeCanvas);
 
       ctx.save();
       ctx.globalAlpha = 0.14;
-      const haze = ctx.createLinearGradient(0, groundLineY(), 0, groundLineY() + 40);
+
+      const haze = ctx.createLinearGradient(
+        0,
+        groundLineY(),
+        0,
+        groundLineY() + 40,
+      );
+
       haze.addColorStop(0, "rgba(255,80,200,0.9)");
       haze.addColorStop(1, "rgba(255,80,200,0)");
+
       ctx.fillStyle = haze;
       ctx.fillRect(0, groundLineY(), cfg.width, 46);
       ctx.restore();
     }
 
-    // ---------------- Obstacles ----------------
-    type Ob = {
+    type Obstacle = {
       x: number;
       y: number;
       w: number;
@@ -381,57 +533,55 @@ window.addEventListener("resize", resizeCanvas);
 
     const EMOJIS = ["🥤", "🥪", "🥧", "🥗", "🍗"] as const;
 
-function pickEmoji() {
-  return EMOJIS[Math.floor(Math.random() * EMOJIS.length)];
-}
-
-function spawnObstacleGroup() {
-  const gap = 12;
-  const w = 44;
-  const h = 44;
-
-  // How wide is a triple train?
-  const tripleWidth = w * 3 + gap * 2;
-
-  // Safety buffer (extra pixels so it's not razor-thin)
-  const buffer = 26;
-
-  // Approx air-time of a jump (seconds)
-  const airTime = (2 * cfg.jumpVel) / cfg.gravity;
-
-  // If current speed can clear a triple comfortably, unlock triples (Tier 1)
-  const triplesUnlocked = speed * airTime >= tripleWidth + buffer;
-
-  // Start: singles + doubles
-  // Tier 1+: triples can appear (rarely at first)
-  let count = 1;
-
-  if (!triplesUnlocked) {
-    // 1–2 only
-    count = Math.random() < 0.35 ? 2 : 1;
-  } else {
-    // 1 most common, 2 sometimes, 3 less common
-    count = Math.random() < 0.16 ? 3 : Math.random() < 0.42 ? 2 : 1;
-  }
-
-  const emoji = pickEmoji();
-  const startX = cfg.width + 20;
-
-  for (let i = 0; i < count; i++) {
-    obstacles.push({
-      x: startX + i * (w + gap),
-      y: groundLineY() - h,
-      w,
-      h,
-      emoji,
-    });
-  }
-}
-
-    let obstacles: Ob[] = [];
+    let obstacles: Obstacle[] = [];
     let distSinceSpawn = 0;
 
-    function getHitbox() {
+    function pickEmoji() {
+      return EMOJIS[
+        Math.floor(Math.random() * EMOJIS.length)
+      ];
+    }
+
+    function spawnObstacleGroup() {
+      const gap = 12;
+      const w = 44;
+      const h = 44;
+
+      const tripleWidth = w * 3 + gap * 2;
+      const buffer = 26;
+      const airTime = (2 * cfg.jumpVel) / cfg.gravity;
+
+      const triplesUnlocked =
+        speed * airTime >= tripleWidth + buffer;
+
+      let count = 1;
+
+      if (!triplesUnlocked) {
+        count = Math.random() < 0.35 ? 2 : 1;
+      } else {
+        count =
+          Math.random() < 0.16
+            ? 3
+            : Math.random() < 0.42
+              ? 2
+              : 1;
+      }
+
+      const emoji = pickEmoji();
+      const startX = cfg.width + 20;
+
+      for (let index = 0; index < count; index += 1) {
+        obstacles.push({
+          x: startX + index * (w + gap),
+          y: groundLineY() - h,
+          w,
+          h,
+          emoji,
+        });
+      }
+    }
+
+    function getHitbox(): CollisionBox {
       return {
         x: player.x + cfg.hitInsetX,
         y: player.y + cfg.hitInsetY,
@@ -440,46 +590,70 @@ function spawnObstacleGroup() {
       };
     }
 
-    function drawObstacle(o: Ob) {
-      // neon glow behind the emoji
+    function drawObstacle(obstacle: Obstacle) {
       ctx.save();
       ctx.shadowBlur = 18;
       ctx.shadowColor = "rgba(255,80,200,0.55)";
       ctx.globalAlpha = 0.95;
 
-      // draw emoji centered in the obstacle box
-      const fontSize = 34; // tweak if you want bigger
-      ctx.font = `${fontSize}px ui-sans-serif, system-ui, "Apple Color Emoji", "Segoe UI Emoji"`;
+      const fontSize = 34;
+
+      ctx.font =
+        `${fontSize}px ui-sans-serif, system-ui, ` +
+        `"Apple Color Emoji", "Segoe UI Emoji"`;
+
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
 
-      const cx = o.x + o.w / 2;
-      const cy = o.y + o.h / 2 + 1;
+      const centerX = obstacle.x + obstacle.w / 2;
+      const centerY = obstacle.y + obstacle.h / 2 + 1;
 
-      // optional subtle outline for readability
       ctx.lineWidth = 3;
       ctx.strokeStyle = "rgba(0,0,0,0.35)";
-      ctx.strokeText(o.emoji, cx, cy);
 
-      ctx.fillText(o.emoji, cx, cy);
+      ctx.strokeText(
+        obstacle.emoji,
+        centerX,
+        centerY,
+      );
+
+      ctx.fillText(
+        obstacle.emoji,
+        centerX,
+        centerY,
+      );
+
       ctx.restore();
 
-      // reset text settings not strictly required, but keeps things clean
       ctx.textAlign = "left";
       ctx.textBaseline = "alphabetic";
     }
 
-    // ---------------- Runner ----------------
     function drawLenny() {
       const img = spriteRef.current;
 
       if (!img) {
         ctx.fillStyle = "rgba(102, 204, 255, 0.9)";
-        roundRect(ctx, player.x, player.y, player.w, player.h, 12, true, false);
+
+        roundRect(
+          ctx,
+          player.x,
+          player.y,
+          player.w,
+          player.h,
+          12,
+          true,
+          false,
+        );
+
         return;
       }
 
-      const pad = Math.max(1, Math.round(player.w * 0.04));
+      const pad = Math.max(
+        1,
+        Math.round(player.w * 0.04),
+      );
+
       ctx.drawImage(
         img,
         player.x - pad,
@@ -489,37 +663,56 @@ function spawnObstacleGroup() {
       );
     }
 
-    // ---------------- UI ----------------
     function drawOverlay(text: string) {
       ctx.fillStyle = "rgba(0,0,0,0.55)";
       ctx.fillRect(0, 0, cfg.width, cfg.height);
+
       ctx.fillStyle = "rgba(234,246,255,0.95)";
       ctx.font = "700 22px ui-sans-serif, system-ui";
-      const w = ctx.measureText(text).width;
-      ctx.fillText(text, cfg.width / 2 - w / 2, cfg.height / 2);
+
+      const textWidth = ctx.measureText(text).width;
+
+      ctx.fillText(
+        text,
+        cfg.width / 2 - textWidth / 2,
+        cfg.height / 2,
+      );
     }
 
     function drawHud() {
       ctx.fillStyle = "rgba(234,246,255,0.92)";
       ctx.font = "14px ui-sans-serif, system-ui";
-      ctx.fillText(`Score: ${Math.floor(internalScore)}`, 18, 24);
-      ctx.fillText(`HI: ${hi}`, 18, 44);
+
+      ctx.fillText(
+        `Score: ${Math.floor(internalScore)}`,
+        18,
+        24,
+      );
+
+      ctx.fillText(
+        `HI: ${hiRef.current}`,
+        18,
+        44,
+      );
     }
 
-    // ---------------- Flow ----------------
     function resetRun() {
-      t = 0;
       runTime = 0;
       motionTime = 0;
 
       internalScore = 0;
       speed = cfg.baseSpeed;
 
-      nextSpeedUpAt = randRange(cfg.speedupMinS, cfg.speedupMaxS);
-      speedupsCount = 0;
+      nextSpeedUpAt = randRange(
+        cfg.speedupMinS,
+        cfg.speedupMaxS,
+      );
 
+      speedupsCount = 0;
       jumps = 0;
       runStartMs = 0;
+
+      submissionStartedRef.current = false;
 
       player.y = cfg.groundY;
       player.vy = 0;
@@ -528,12 +721,15 @@ function spawnObstacleGroup() {
       obstacles = [];
       distSinceSpawn = 200;
 
-      // seed clouds across the sky
       clouds = [];
-      for (let i = 0; i < 7; i++) spawnCloud(randRange(0, cfg.width));
+
+      for (let index = 0; index < 7; index += 1) {
+        spawnCloud(randRange(0, cfg.width));
+      }
 
       setScore(0);
-      setSubmitMsg(null);
+      setSubmitError(null);
+      setSubmitMessage(null);
     }
 
     function toReady() {
@@ -542,55 +738,113 @@ function spawnObstacleGroup() {
     }
 
     function startRunIfNeeded() {
-      if (uiStateRef.current === "ready") {
-        runStartMs = Date.now();
-        setState("running");
-      }
+      if (uiStateRef.current !== "ready") return;
+
+      runStartMs = Date.now();
+      setState("running");
     }
 
     function jump() {
       if (uiStateRef.current !== "running") return;
       if (!player.onGround) return;
+
       player.vy = -cfg.jumpVel;
       player.onGround = false;
       jumps += 1;
     }
 
     async function submitRun(finalScore: number) {
-      if (isGuest || !userId) {
-        setSubmitMsg("Guest mode: run not submitted (no XP).");
+      if (submissionStartedRef.current) return;
+
+      submissionStartedRef.current = true;
+
+      if (isGuest || !memberId) {
+        setSubmitError(null);
+
+        setSubmitMessage(
+          "Guest run complete. XP and official Lunchbox Run records were not saved.",
+        );
+
         return;
       }
 
+      const timeMs = runStartMs
+        ? Math.max(1, Date.now() - runStartMs)
+        : 1;
+
       try {
         setSubmitting(true);
-        setSubmitMsg(null);
+        setSubmitError(null);
+        setSubmitMessage(null);
 
-        const timeMs = runStartMs ? Math.max(0, Date.now() - runStartMs) : 0;
-
-        const res = await fetch("/api/bitgalaxy/quests/complete-lunchbox-run", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            orgId,
-            userId,
-            score: Math.floor(finalScore),
-            stats: {
-              timeMs,
-              jumps,
-              speedups: speedupsCount,
+        const response = await fetch(
+          "/api/bitgalaxy/quests/complete-lunchbox-run",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
             },
-          }),
-        });
+            credentials: "include",
+            body: JSON.stringify({
+              orgId,
+              memberId,
+              score: Math.floor(finalScore),
+              stats: {
+                timeMs,
+                jumps,
+                speedups: speedupsCount,
+              },
+            }),
+          },
+        );
 
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          setSubmitMsg(data?.error ?? "Could not submit run.");
-          return;
+        const data = (await response
+          .json()
+          .catch(() => ({}))) as LunchboxRunCompletionResponse;
+
+        if (!response.ok || !data.success) {
+          throw new Error(
+            data.error ?? "Could not submit Lunchbox Run.",
+          );
         }
 
-        setSubmitMsg(
-          `Submitted • Tier ${data?.tier ?? "?"} • +${data?.xpAwarded ?? 0} XP`,
+        const submittedLevel =
+          data.result?.submittedLevel ?? 0;
+
+        const xpAwarded =
+          data.result?.xpAwarded ?? 0;
+
+        const statsImproved =
+          data.result?.statsImproved === true;
+
+        if (xpAwarded > 0) {
+          setSubmitMessage(
+            `Tier ${submittedLevel} synced. You earned ${xpAwarded} XP.`,
+          );
+        } else if (statsImproved) {
+          setSubmitMessage(
+            "New Lunchbox Run personal best recorded. No additional weekly XP was available.",
+          );
+        } else {
+          setSubmitMessage(
+            "Run recorded. No additional XP was available for this tier.",
+          );
+        }
+
+        window.setTimeout(() => {
+          router.push(returnHref);
+          router.refresh();
+        }, 1200);
+      } catch (error: unknown) {
+        console.error(
+          "Lunchbox Run submission error:",
+          error,
+        );
+
+        setSubmitError(
+          error instanceof Error
+            ? error.message
+            : "The run ended locally, but the result could not be synchronized.",
         );
       } finally {
         setSubmitting(false);
@@ -598,16 +852,37 @@ function spawnObstacleGroup() {
     }
 
     function endGame() {
-      const final = Math.floor(internalScore);
+      if (uiStateRef.current !== "running") return;
 
-      const nextHi = Math.max(hi, final);
-      if (nextHi !== hi) {
+      const finalScore = Math.floor(internalScore);
+      const nextHi = Math.max(hiRef.current, finalScore);
+
+      if (nextHi !== hiRef.current) {
+        hiRef.current = nextHi;
         setHi(nextHi);
-        localStorage.setItem("bg_lunchbox_run_hi", String(nextHi));
+
+        window.localStorage.setItem(
+          "bg_lunchbox_run_hi",
+          String(nextHi),
+        );
       }
 
       setState("gameover");
-      submitRun(final);
+      void submitRun(finalScore);
+    }
+
+    function weightedGapJitter() {
+      const randomValue = Math.random();
+
+      if (randomValue < 0.12) {
+        return randRange(-120, -20);
+      }
+
+      if (randomValue < 0.82) {
+        return randRange(0, 220);
+      }
+
+      return randRange(220, 520);
     }
 
     function update(dt: number) {
@@ -615,26 +890,43 @@ function spawnObstacleGroup() {
 
       runTime += dt;
 
-      // speed ramps every 6–10 seconds by 5–10%
-      if (runTime >= nextSpeedUpAt && speed < cfg.maxSpeed) {
-        const mult = randRange(cfg.speedupMinMult, cfg.speedupMaxMult);
-        speed = Math.min(cfg.maxSpeed, speed * mult);
+      if (
+        runTime >= nextSpeedUpAt &&
+        speed < cfg.maxSpeed
+      ) {
+        const multiplier = randRange(
+          cfg.speedupMinMult,
+          cfg.speedupMaxMult,
+        );
+
+        speed = Math.min(
+          cfg.maxSpeed,
+          speed * multiplier,
+        );
+
         speedupsCount += 1;
-        nextSpeedUpAt += randRange(cfg.speedupMinS, cfg.speedupMaxS);
+
+        nextSpeedUpAt += randRange(
+          cfg.speedupMinS,
+          cfg.speedupMaxS,
+        );
       }
 
-      // score scales with time + speed
       internalScore += dt * (5 + speed * 0.05);
       setScore(Math.floor(internalScore));
 
-      // clouds drift left
-      for (const c of clouds) {
-        c.x -= c.speed * dt + speed * 0.08 * dt;
+      for (const cloud of clouds) {
+        cloud.x -= cloud.speed * dt + speed * 0.08 * dt;
       }
-      clouds = clouds.filter((c) => c.x + c.w > -200);
-      if (clouds.length < 9 && Math.random() < 0.03) spawnCloud();
 
-      // player physics
+      clouds = clouds.filter(
+        (cloud) => cloud.x + cloud.w > -200,
+      );
+
+      if (clouds.length < 9 && Math.random() < 0.03) {
+        spawnCloud();
+      }
+
       player.vy += cfg.gravity * dt;
       player.y += player.vy * dt;
 
@@ -646,20 +938,15 @@ function spawnObstacleGroup() {
         player.onGround = false;
       }
 
-      // spawn by distance traveled (roomy early game)
       distSinceSpawn += speed * dt;
 
       const warmupSeconds = 25;
-      const warmupT = Math.min(runTime / warmupSeconds, 1);
-      const earlyBonusGap = (1 - warmupT) * 220;
+      const warmupT = Math.min(
+        runTime / warmupSeconds,
+        1,
+      );
 
-      // More natural spacing: mostly medium gaps, sometimes big gaps, rarely tight gaps.
-      function weightedGapJitter() {
-        const r = Math.random();
-        if (r < 0.12) return randRange(-120, -20);  // rare: tighter
-        if (r < 0.82) return randRange(0, 220);     // common: roomy/varied
-        return randRange(220, 520);                 // occasional: big breathing room
-      }
+      const earlyBonusGap = (1 - warmupT) * 220;
 
       const desiredGap =
         cfg.obstacleBaseGap +
@@ -672,13 +959,18 @@ function spawnObstacleGroup() {
         distSinceSpawn = 0;
       }
 
-      for (const o of obstacles) o.x -= speed * dt;
-      obstacles = obstacles.filter((o) => o.x + o.w > -60);
+      for (const obstacle of obstacles) {
+        obstacle.x -= speed * dt;
+      }
 
-      // collisions
-      const hb = getHitbox();
-      for (const o of obstacles) {
-        if (aabb(hb, o)) {
+      obstacles = obstacles.filter(
+        (obstacle) => obstacle.x + obstacle.w > -60,
+      );
+
+      const hitbox = getHitbox();
+
+      for (const obstacle of obstacles) {
+        if (aabb(hitbox, obstacle)) {
           endGame();
           break;
         }
@@ -691,24 +983,34 @@ function spawnObstacleGroup() {
       ctx.save();
       ctx.scale(view.sx, view.sy);
 
-      // everything below stays in your 960×320 coordinate system
       drawSkyAndGround();
       drawStars();
       drawClouds();
       drawGroundLine();
-      for (const o of obstacles) drawObstacle(o);
+
+      for (const obstacle of obstacles) {
+        drawObstacle(obstacle);
+      }
+
       drawLenny();
       drawHud();
-      if (uiStateRef.current === "ready") drawOverlay("Press SPACE to start");
-      else if (uiStateRef.current === "gameover") drawOverlay("Game Over — Press R");
+
+      if (uiStateRef.current === "ready") {
+        drawOverlay("Press SPACE to start");
+      } else if (uiStateRef.current === "gameover") {
+        drawOverlay("Game Over — Press R");
+      }
 
       ctx.restore();
     }
 
     function tick(now: number) {
-      const dt = Math.min(0.033, (now - last) / 1000);
+      const dt = Math.min(
+        0.033,
+        (now - last) / 1000,
+      );
+
       last = now;
-      t += dt;
 
       if (uiStateRef.current === "running") {
         motionTime += dt;
@@ -720,33 +1022,50 @@ function spawnObstacleGroup() {
       raf = requestAnimationFrame(tick);
     }
 
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.code === "Space" || e.code === "ArrowUp") {
-        e.preventDefault();
-        if (uiStateRef.current === "ready") startRunIfNeeded();
-        else if (uiStateRef.current === "gameover") toReady();
-        else jump();
+    function onKeyDown(event: KeyboardEvent) {
+      if (
+        event.code === "Space" ||
+        event.code === "ArrowUp"
+      ) {
+        event.preventDefault();
+
+        if (uiStateRef.current === "ready") {
+          startRunIfNeeded();
+        } else if (uiStateRef.current === "gameover") {
+          toReady();
+        } else {
+          jump();
+        }
       }
 
-      if (e.code === "KeyR") {
-        e.preventDefault();
+      if (event.code === "KeyR") {
+        event.preventDefault();
         toReady();
       }
     }
 
-    function onPointerDown(e: PointerEvent) {
-      e.preventDefault(); // stops scroll/zoom on mobile taps
-      if (uiStateRef.current === "ready") startRunIfNeeded();
-      else if (uiStateRef.current === "gameover") toReady();
-      else jump();
+    function onPointerDown(event: PointerEvent) {
+      event.preventDefault();
+
+      if (uiStateRef.current === "ready") {
+        startRunIfNeeded();
+      } else if (uiStateRef.current === "gameover") {
+        toReady();
+      } else {
+        jump();
+      }
     }
 
-    // Start loop + listeners
     window.addEventListener("keydown", onKeyDown);
-    const wrap = wrapRef.current;
-    window.addEventListener("pointerdown", onPointerDown, { passive: false });
 
-    // initialize UI
+    const wrap = wrapRef.current;
+
+    wrap?.addEventListener(
+      "pointerdown",
+      onPointerDown,
+      { passive: false },
+    );
+
     uiStateRef.current = "ready";
     setUiState("ready");
     resetRun();
@@ -755,46 +1074,143 @@ function spawnObstacleGroup() {
 
     return () => {
       cancelAnimationFrame(raf);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", resizeCanvas);
-      window.removeEventListener("pointerdown", onPointerDown);
+
+      window.removeEventListener(
+        "keydown",
+        onKeyDown,
+      );
+
+      window.removeEventListener(
+        "resize",
+        resizeCanvas,
+      );
+
+      wrap?.removeEventListener(
+        "pointerdown",
+        onPointerDown,
+      );
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg, orgId, userId, isGuest]);
+    // The canvas engine should only restart when its actual
+    // identity or mode changes.
+  }, [
+    cfg,
+    orgId,
+    memberId,
+    isGuest,
+    returnHref,
+    router,
+  ]);
+
+  const modeLabel = isGuest
+    ? "Guest Mode"
+    : submitting
+      ? "Submitting..."
+      : "Online Mode";
 
   return (
-    <div className="space-y-3">
-    <div
-      ref={wrapRef}
-      className="rounded-2xl border border-white/10 bg-black/30 overflow-hidden p-0 sm:p-3 touch-manipulation select-none"
+    <GameQuestShell
+      badgeLabel="Arcade Game"
+      title="Lunchbox Run"
+      subtitle="Sprint the synthwave grid, leap over neon hazards, and survive long enough to unlock higher weekly tiers."
+      orgId={orgId}
+      worldName={worldName}
+      memberId={memberId}
+      memberName={memberName}
+      isGuest={isGuest}
+      returnHref={returnHref}
+      returnLabel="Back to arcade"
     >
-      <canvas ref={canvasRef} className="block w-full h-auto" />
-    </div>
+      <div className="flex flex-col gap-3 rounded-2xl border border-pink-500/30 bg-slate-950/95 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap gap-4 text-[11px]">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.22em] text-pink-300/80">
+              Score
+            </p>
 
-      <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-        <div className="text-white/70">
-          Jump-only • Speed ramps every 6–10s by 5–10% •{" "}
-          <span className="text-white/80">Score:</span> {score}{" "}
-          <span className="text-white/50">/</span>{" "}
-          <span className="text-white/80">HI:</span> {hi}
-          {submitMsg ? (
-            <span className="ml-2 text-white/80">• {submitMsg}</span>
-          ) : null}
+            <p className="mt-1 font-mono text-sm text-pink-100">
+              {score}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.22em] text-pink-300/80">
+              Local High
+            </p>
+
+            <p className="mt-1 font-mono text-sm text-pink-100">
+              {hi}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.22em] text-pink-300/80">
+              Status
+            </p>
+
+            <p className="mt-1 font-mono text-sm capitalize text-pink-100">
+              {uiState}
+            </p>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => {
-              localStorage.setItem("bg_lunchbox_run_hi", String(hi));
-            }}
-            className="rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm text-white/80 hover:bg-white/10 disabled:opacity-60"
-            disabled={submitting}
-            title="High score is auto-saved"
-          >
-            {submitting ? "Submitting..." : isGuest ? "Guest Mode" : "Online Mode"}
-          </button>
-        </div>
+        <span
+          className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[10px] ${
+            isGuest
+              ? "border-amber-400/50 bg-amber-500/10 text-amber-200"
+              : "border-sky-400/50 bg-sky-500/10 text-sky-200"
+          }`}
+        >
+          <span
+            className={`h-2 w-2 rounded-full ${
+              uiState === "running"
+                ? "animate-pulse bg-pink-400"
+                : "bg-slate-400"
+            }`}
+          />
+
+          {modeLabel}
+        </span>
       </div>
-    </div>
+
+      <div
+        ref={wrapRef}
+        className="mt-4 touch-manipulation select-none overflow-hidden rounded-2xl border border-white/10 bg-black/30 p-0 sm:p-3"
+      >
+        <canvas
+          ref={canvasRef}
+          className="block h-auto w-full"
+        />
+      </div>
+
+      <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-[11px] leading-5 text-white/65">
+        Press Space, Arrow Up, or tap the game area to start and jump. Speed
+        increases every 6–10 seconds.
+      </div>
+
+      {!spriteReady && (
+        <p className="mt-3 text-[11px] text-amber-200/80">
+          Lenny’s sprite could not be loaded. A temporary runner shape is being
+          used.
+        </p>
+      )}
+
+      {submitError && (
+        <p
+          role="alert"
+          className="mt-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200"
+        >
+          {submitError}
+        </p>
+      )}
+
+      {submitMessage && (
+        <p
+          role="status"
+          className="mt-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200"
+        >
+          {submitMessage}
+        </p>
+      )}
+    </GameQuestShell>
   );
 }

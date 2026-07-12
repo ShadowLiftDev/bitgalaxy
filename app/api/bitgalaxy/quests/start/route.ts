@@ -1,36 +1,70 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { startQuest } from "@/lib/bitgalaxy/startQuest";
 import { getActiveQuests } from "@/lib/bitgalaxy/getActiveQuests";
-import { getQuest } from "@/lib/bitgalaxy/getQuest";
 import { getPlayer } from "@/lib/bitgalaxy/getPlayer";
+import { getQuest } from "@/lib/bitgalaxy/getQuest";
 import { getRankProgress } from "@/lib/bitgalaxy/rankEngine";
 import { requirePlayerSession } from "@/lib/bitgalaxy/playerSession";
+import { startQuest } from "@/lib/bitgalaxy/startQuest";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-export async function POST(req: NextRequest) {
+type StartQuestRequestBody = {
+  orgId?: unknown;
+  questId?: unknown;
+  memberId?: unknown;
+};
+
+export async function POST(
+  request: NextRequest,
+) {
   try {
-    const body = await req.json().catch(() => ({} as any));
+    const body = (await request
+      .json()
+      .catch(() => null)) as
+      | StartQuestRequestBody
+      | null;
 
-    const orgId = body.orgId as string | undefined;
-    const questId = body.questId as string | undefined;
-
-    if (!orgId || !questId) {
+    if (!body) {
       return NextResponse.json(
-        { success: false, error: "Missing orgId or questId" },
+        {
+          success: false,
+          error: "A valid JSON request body is required.",
+        },
         { status: 400 },
       );
     }
 
-    // 🔐 Use the player session cookie (minted by lookup-player)
-    const session = requirePlayerSession(req);
+    const orgId = normalizeRequiredString(
+      body.orgId,
+    );
 
-    if (!session?.userId) {
+    const questId = normalizeRequiredString(
+      body.questId,
+    );
+
+    if (!orgId || !questId) {
       return NextResponse.json(
-        { success: false, error: "No player session found" },
+        {
+          success: false,
+          error: "Missing orgId or questId.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const session = requirePlayerSession(
+      request,
+    );
+
+    if (!session?.memberId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "No member session found.",
+        },
         { status: 401 },
       );
     }
@@ -39,61 +73,228 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: "Session org does not match requested orgId",
+          error:
+            "Session organization does not match the requested organization.",
         },
         { status: 403 },
       );
     }
 
-    const playerId = session.userId;
+    const requestedMemberId =
+      normalizeOptionalString(body.memberId);
 
-    // 1) mark quest as started / active for this player
-    await startQuest(orgId, playerId, questId);
-
-    // 2) load updated player + quest + active quests for HUD refresh
-    const [player, quest, activeQuests] = await Promise.all([
-      getPlayer(orgId, playerId),
-      getQuest(orgId, questId),
-      getActiveQuests(orgId, playerId),
-    ]);
-
-    if (!player) {
+    if (
+      requestedMemberId &&
+      requestedMemberId !== session.memberId
+    ) {
       return NextResponse.json(
         {
           success: false,
-          error: "Player not found after starting quest",
+          error:
+            "Session member does not match the requested member.",
+        },
+        { status: 403 },
+      );
+    }
+
+    const memberId = session.memberId;
+
+    const quest = await getQuest(
+      orgId,
+      questId,
+    );
+
+    if (!quest) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Quest not found.",
         },
         { status: 404 },
       );
     }
 
-    const totalXP =
-      typeof (player as any)?.totalXP === "number"
-        ? (player as any).totalXP
-        : (typeof (player as any)?.xp === "number"
-            ? (player as any).xp
-            : 0);
+    if (!quest.isActive) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Quest is not active.",
+        },
+        { status: 400 },
+      );
+    }
 
-    const rank = getRankProgress(totalXP);
+    if (quest.type === "arcade") {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Arcade games are started through their game page.",
+        },
+        { status: 400 },
+      );
+    }
+
+    if (quest.type === "checkin") {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Check-in quests are handled through the check-in endpoint.",
+        },
+        { status: 400 },
+      );
+    }
+
+    await startQuest(
+      orgId,
+      memberId,
+      questId,
+    );
+
+    const [player, activeQuests] =
+      await Promise.all([
+        getPlayer(orgId, memberId),
+        getActiveQuests(orgId, memberId),
+      ]);
+
+    if (!player) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Member progress could not be loaded after starting the quest.",
+        },
+        { status: 404 },
+      );
+    }
+
+    const progress = getRankProgress(
+      player.totalXP,
+    );
 
     return NextResponse.json({
       success: true,
+
       orgId,
+      memberId,
       questId,
-      playerId,
-      player,
+
       quest,
       activeQuests,
-      rank,
+
+      player: {
+        memberId: player.memberId,
+        orgId: player.orgId,
+
+        displayName:
+          player.displayName ?? null,
+
+        totalXP: player.totalXP,
+        rank: player.rank,
+        level: player.level,
+        weeklyXP: player.weeklyXP,
+        weeklyWeekKey:
+          player.weeklyWeekKey,
+
+        progress,
+      },
     });
-  } catch (err: any) {
-    console.error("BitGalaxy start-quest error:", err);
+  } catch (error: unknown) {
+    console.error(
+      "[bitgalaxy:quests:start:POST]",
+      error,
+    );
+
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to start quest.";
+
+    const status =
+      getErrorStatus(error);
+
     return NextResponse.json(
       {
         success: false,
-        error: err?.message || "Failed to start quest",
+        error: message,
       },
-      { status: 500 },
+      { status },
     );
   }
+}
+
+function normalizeRequiredString(
+  value: unknown,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return normalized || null;
+}
+
+function normalizeOptionalString(
+  value: unknown,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return normalized || null;
+}
+
+function getErrorStatus(
+  error: unknown,
+): number {
+  if (
+    error &&
+    typeof error === "object" &&
+    "status" in error
+  ) {
+    const status = Number(
+      (error as { status?: unknown }).status,
+    );
+
+    if (
+      Number.isInteger(status) &&
+      status >= 400 &&
+      status <= 599
+    ) {
+      return status;
+    }
+  }
+
+  if (
+    error instanceof Error &&
+    error.message.toLowerCase().includes(
+      "not found",
+    )
+  ) {
+    return 404;
+  }
+
+  if (
+    error instanceof Error &&
+    error.message.toLowerCase().includes(
+      "not connected",
+    )
+  ) {
+    return 403;
+  }
+
+  if (
+    error instanceof Error &&
+    error.message.toLowerCase().includes(
+      "completion limit",
+    )
+  ) {
+    return 409;
+  }
+
+  return 500;
 }

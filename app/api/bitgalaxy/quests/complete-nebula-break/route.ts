@@ -1,281 +1,1102 @@
+import { FieldValue } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
+
 import { adminDb } from "@/lib/firebase-admin";
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { getISOWeekKey } from "@/lib/weekKey";
 import { getActiveQuests } from "@/lib/bitgalaxy/getActiveQuests";
 import { getPlayer } from "@/lib/bitgalaxy/getPlayer";
-import { getRankProgress } from "@/lib/bitgalaxy/rankEngine";
-import { ensureArcadeQuestExists } from "@/lib/bitgalaxy/ensureArcadeQuestExists";
-// ✅ no requireUser import here
-import { updateXP } from "@/lib/bitgalaxy/updateXP";
-import { writeAuditLog } from "@/lib/bitgalaxy/auditLog";
-import { getISOWeekKey } from "@/lib/weekKey";
+import { getQuest } from "@/lib/bitgalaxy/getQuest";
+import { getWorld } from "@/lib/bitgalaxy/getWorld";
+import {
+  getLevelForXP,
+  getRankForXP,
+  getRankProgress,
+} from "@/lib/bitgalaxy/rankEngine";
+import { requirePlayerSession } from "@/lib/bitgalaxy/playerSession";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-type LevelDef = { label?: string; xp: number; description?: string };
+const GAME_ID = "nebula-break";
+const MODULE_ID = "bitgalaxy";
 
-type NebulaBreakStats = {
-  score?: number;
-  bricks?: number;
-  timeMs?: number;
+const BRICK_COLUMNS = 7;
+const SCORE_PER_BRICK = 10;
+
+type DifficultyLevel = 1 | 2 | 3;
+
+type NebulaBreakRequestBody = {
+  orgId?: unknown;
+  memberId?: unknown;
+  level?: unknown;
+
+  stats?: {
+    score?: unknown;
+    bricks?: unknown;
+    timeMs?: unknown;
+    cleared?: unknown;
+  };
 };
 
-function xpForLevel(
-  level: number,
-  levels?: LevelDef[] | null,
-  fallbackBase = 75,
-) {
-  const lvl = Math.max(1, Math.min(3, Math.floor(level || 1)));
+type LevelDefinition = {
+  level: DifficultyLevel;
+  xp: number;
+};
 
-  if (Array.isArray(levels) && levels.length >= lvl) {
-    const v = Number(levels[lvl - 1]?.xp || 0);
-    return Math.max(0, Math.floor(v));
-  }
+type StoredNebulaBreakGame = {
+  completed?: unknown;
 
-  // fallback if quest doc not configured
-  if (lvl === 1) return fallbackBase;
-  if (lvl === 2) return fallbackBase * 2;
-  return fallbackBase * 3;
-}
+  weeklyWeekKey?: unknown;
+  weeklyBestLevel?: unknown;
 
-export async function POST(req: NextRequest) {
+  bestLevel?: unknown;
+  bestScore?: unknown;
+  bestBricks?: unknown;
+  bestTimeMs?: unknown;
+};
+
+const FALLBACK_LEVELS: LevelDefinition[] = [
+  {
+    level: 1,
+    xp: 75,
+  },
+  {
+    level: 2,
+    xp: 150,
+  },
+  {
+    level: 3,
+    xp: 225,
+  },
+];
+
+export async function POST(request: NextRequest) {
   try {
-    const body = await req.json();
+    const body = (await request.json().catch(() => null)) as
+      | NebulaBreakRequestBody
+      | null;
 
-    const orgId = body.orgId as string | undefined;
-    const targetUserId = body.userId as string | undefined;
-    const rawLevel = Number(body.level || 1);
-    const stats = body.stats as NebulaBreakStats | undefined;
-
-    if (!orgId || !targetUserId) {
+    if (!body) {
       return NextResponse.json(
-        { error: "Missing orgId or userId" },
+        {
+          success: false,
+          error: "A valid JSON request body is required.",
+        },
         { status: 400 },
       );
     }
 
-    const questId = "nebula-break";
+    const orgId = normalizeRequiredString(body.orgId);
 
-    await ensureArcadeQuestExists(orgId, questId, {
-      title: "Nebula Break – Arcade Mission",
-      description:
-        "Smash through neon brickfields and push your score into the stratosphere.",
-      xp: 75,
-    });
+    if (!orgId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Missing orgId.",
+        },
+        { status: 400 },
+      );
+    }
 
-    const questSnap = await adminDb
-      .collection("orgs")
-      .doc(orgId)
-      .collection("bitgalaxyQuests")
-      .doc(questId)
-      .get();
+    const session = requirePlayerSession(request);
 
-    const questData = (questSnap.data() || {}) as any;
-    const configuredLevels: LevelDef[] | null =
-      (questData.levels as LevelDef[] | undefined) ??
-      (questData.meta?.levels as LevelDef[] | undefined) ??
-      null;
+    if (!session?.memberId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "A connected BitGalaxy member session is required.",
+        },
+        { status: 401 },
+      );
+    }
 
-    const baseXP = Number(questData.xp || 75);
-    const weekKey = getISOWeekKey(new Date());
+    if (session.orgId !== orgId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Session organization does not match the requested organization.",
+        },
+        { status: 403 },
+      );
+    }
 
-    const playerRef = adminDb
-      .collection("orgs")
-      .doc(orgId)
-      .collection("bitgalaxyPlayers")
-      .doc(targetUserId);
-
-    const now = FieldValue.serverTimestamp() as Timestamp;
-
-    let xpAwarded = 0;
-    let newBestLevel = 0;
-
-    // Clamp level between 1 and 3 (we can later add deterministic tiering from stats)
-    const requestedLevel = Math.max(
-      1,
-      Math.min(3, Math.floor(rawLevel || 1)),
+    const requestedMemberId = normalizeOptionalString(
+      body.memberId,
     );
 
-    await adminDb.runTransaction(async (tx) => {
-      const snap = await tx.get(playerRef);
-      if (!snap.exists) {
-        // Distinct code so we can return 404
-        throw new Error(
-          `PLAYER_NOT_FOUND::Player ${targetUserId} does not exist in org ${orgId}`,
-        );
-      }
-
-      const data = (snap.data() || {}) as any;
-      const completedQuestIds: string[] = data.completedQuestIds ?? [];
-
-      const specialEvents = (data.specialEvents || {}) as any;
-      const nb = (specialEvents.nebulaBreak || {}) as {
-        weekKey?: string;
-        bestLevel?: number;
-        bestScore?: number | null;
-        bestBricks?: number | null;
-        bestTimeMs?: number | null;
-      };
-
-      const prevWeekKey = String(nb.weekKey || "");
-      const prevBestLevel =
-        prevWeekKey === weekKey ? Number(nb.bestLevel || 0) : 0;
-
-      if (requestedLevel <= prevBestLevel) {
-        throw new Error("NEBULA_BREAK_TIER_ALREADY_RECORDED");
-      }
-
-      const prevXP = xpForLevel(prevBestLevel, configuredLevels, baseXP);
-      const nextXP = xpForLevel(requestedLevel, configuredLevels, baseXP);
-
-      xpAwarded = Math.max(0, nextXP - prevXP);
-      if (xpAwarded <= 0) {
-        throw new Error("NEBULA_BREAK_NO_XP_DELTA");
-      }
-
-      const score =
-        typeof stats?.score === "number" ? stats.score : null;
-      const bricks =
-        typeof stats?.bricks === "number" ? stats.bricks : null;
-      const timeMs =
-        typeof stats?.timeMs === "number" ? stats.timeMs : null;
-
-      const bestScore = nb.bestScore ?? null;
-      const bestBricks = nb.bestBricks ?? null;
-      const bestTimeMs = nb.bestTimeMs ?? null;
-
-      // For Nebula: higher score/bricks and longer survival time are better
-      const nextBestScore =
-        score !== null
-          ? bestScore === null
-            ? score
-            : Math.max(bestScore, score)
-          : bestScore;
-
-      const nextBestBricks =
-        bricks !== null
-          ? bestBricks === null
-            ? bricks
-            : Math.max(bestBricks, bricks)
-          : bestBricks;
-
-      const nextBestTimeMs =
-        timeMs !== null
-          ? bestTimeMs === null
-            ? timeMs
-            : Math.max(bestTimeMs, timeMs)
-          : bestTimeMs;
-
-      newBestLevel = requestedLevel;
-
-      const nextCompleted = completedQuestIds.includes(questId)
-        ? completedQuestIds
-        : [...completedQuestIds, questId];
-
-      tx.set(
-        playerRef,
+    if (
+      requestedMemberId &&
+      requestedMemberId !== session.memberId
+    ) {
+      return NextResponse.json(
         {
-          completedQuestIds: nextCompleted,
-          specialEvents: {
-            ...specialEvents,
-            nebulaBreak: {
-              weekKey,
-              bestLevel: requestedLevel,
-              bestScore: nextBestScore,
-              bestBricks: nextBestBricks,
-              bestTimeMs: nextBestTimeMs,
-              lastResult: {
-                level: requestedLevel,
-                score,
-                bricks,
-                timeMs,
-              },
-            },
-          },
-          updatedAt: now,
+          success: false,
+          error:
+            "Session member does not match the requested member.",
         },
-        { merge: true },
+        { status: 403 },
       );
-    });
+    }
 
-    await updateXP(orgId, targetUserId, xpAwarded, {
-      source: "nebula_break_tier",
-      questId,
-      meta: { weekKey, tier: newBestLevel },
-    });
+    const memberId = session.memberId;
 
-    await writeAuditLog(orgId, targetUserId, {
-      eventType: "arcade_tier_complete",
-      questId,
-      xpChange: xpAwarded,
-      source: "nebula_break",
-      meta: { weekKey, tier: newBestLevel, stats: stats ?? null },
-    });
+    const requestedLevel = normalizeLevel(body.level);
 
-    const [activeQuests, player] = await Promise.all([
-      getActiveQuests(orgId, targetUserId),
-      getPlayer(orgId, targetUserId),
+    if (!requestedLevel) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "level must be an integer from 1 through 3.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const score = normalizeNonNegativeInteger(
+      body.stats?.score,
+    );
+
+    const bricks = normalizeNonNegativeInteger(
+      body.stats?.bricks,
+    );
+
+    const timeMs = normalizePositiveInteger(
+      body.stats?.timeMs,
+    );
+
+    const cleared = normalizeBoolean(
+      body.stats?.cleared,
+    );
+
+    if (
+      score === null ||
+      bricks === null ||
+      timeMs === null ||
+      cleared === null
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "score, bricks, timeMs, and cleared must contain valid values.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const maximumBricks = getMaximumBricksForLevel(
+      requestedLevel,
+    );
+
+    if (bricks > maximumBricks) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Submitted brick count exceeds the maximum for the selected tier.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const expectedScore = bricks * SCORE_PER_BRICK;
+
+    if (score !== expectedScore) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Submitted score does not match the number of destroyed bricks.",
+        },
+        { status: 400 },
+      );
+    }
+
+    if (cleared && bricks !== maximumBricks) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "A cleared field must include every brick from the selected tier.",
+        },
+        { status: 400 },
+      );
+    }
+
+    if (!cleared && bricks === maximumBricks) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "A run that destroyed every brick must be marked as cleared.",
+        },
+        { status: 400 },
+      );
+    }
+
+    /*
+     * Broad sanity limit only. This is not intended to be
+     * complete anti-cheat validation.
+     */
+    if (timeMs > 3_600_000) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Submitted Nebula Break duration is outside the accepted range.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const [world, quest] = await Promise.all([
+      getWorld(orgId),
+      getQuest(orgId, GAME_ID),
     ]);
 
-    const progress = getRankProgress(player.totalXP);
-
-    return NextResponse.json({
-      success: true,
-      weekKey,
-      tier: newBestLevel,
-      xpAwarded,
-      activeQuests,
-      player: {
-        userId: player.userId,
-        orgId: player.orgId,
-        totalXP: player.totalXP,
-        rank: player.rank,
-        level: (player as any).level ?? 1,
-        weeklyXP: (player as any).weeklyXP ?? 0,
-        weeklyWeekKey: (player as any).weeklyWeekKey ?? "",
-        progress,
-      },
-    });
-  } catch (error: any) {
-    console.error("BitGalaxy complete-nebula-break error:", error);
-
-    const msg = String(error?.message || "");
-
-    if (msg === "NEBULA_BREAK_TIER_ALREADY_RECORDED") {
+    if (
+      !world ||
+      world.status !== "active" ||
+      world.allowPublicAccess !== true
+    ) {
       return NextResponse.json(
         {
+          success: false,
           error:
-            "Tier already recorded this week. Improve your score or bricks to earn more XP.",
+            "This BitGalaxy world is not currently available.",
         },
-        { status: 409 },
+        { status: 403 },
       );
     }
 
-    if (msg === "NEBULA_BREAK_NO_XP_DELTA") {
+    if (
+      !quest ||
+      quest.isActive !== true ||
+      quest.type !== "arcade"
+    ) {
       return NextResponse.json(
         {
+          success: false,
           error:
-            "No XP change for this tier. You’ve already logged an equal or better performance.",
-        },
-        { status: 409 },
-      );
-    }
-
-    if (msg.startsWith("PLAYER_NOT_FOUND::")) {
-      return NextResponse.json(
-        {
-          error:
-            "Player profile not found in this world. Refresh the BitGalaxy dashboard and re-link your ID.",
+            "Nebula Break is not currently available.",
         },
         { status: 404 },
       );
     }
 
+    const levelDefinitions = resolveLevelDefinitions(
+      quest.metadata,
+      quest.xp,
+    );
+
+    const memberRef = adminDb
+      .collection("members")
+      .doc(memberId);
+
+    const orgLinkRef = memberRef
+      .collection("orgLinks")
+      .doc(orgId);
+
+    const moduleRef = orgLinkRef
+      .collection("modules")
+      .doc(MODULE_ID);
+
+    const stateRef = moduleRef
+      .collection("state")
+      .doc("current");
+
+    const gameRef = moduleRef
+      .collection("games")
+      .doc(GAME_ID);
+
+    const activityRef = adminDb
+      .collection("activities")
+      .doc();
+
+    const weekKey = getISOWeekKey(new Date());
+
+    const result = await adminDb.runTransaction(
+      async (transaction) => {
+        const [
+          memberSnapshot,
+          orgLinkSnapshot,
+          stateSnapshot,
+          gameSnapshot,
+        ] = await Promise.all([
+          transaction.get(memberRef),
+          transaction.get(orgLinkRef),
+          transaction.get(stateRef),
+          transaction.get(gameRef),
+        ]);
+
+        if (!memberSnapshot.exists) {
+          throw new Error(
+            `MEMBER_NOT_FOUND:${memberId}`,
+          );
+        }
+
+        if (!orgLinkSnapshot.exists) {
+          throw new Error(
+            `MEMBER_NOT_CONNECTED:${memberId}`,
+          );
+        }
+
+        const stateData =
+          stateSnapshot.data() ?? {};
+
+        const gameData = (
+          gameSnapshot.data() ?? {}
+        ) as StoredNebulaBreakGame;
+
+        const previousWeeklyWeekKey =
+          typeof gameData.weeklyWeekKey === "string"
+            ? gameData.weeklyWeekKey
+            : "";
+
+        const previousWeeklyBestLevel =
+          previousWeeklyWeekKey === weekKey
+            ? normalizeStoredNonNegativeInteger(
+                gameData.weeklyBestLevel,
+              )
+            : 0;
+
+        const previousWeeklyReward = xpForLevel(
+          previousWeeklyBestLevel,
+          levelDefinitions,
+        );
+
+        const requestedWeeklyReward = xpForLevel(
+          requestedLevel,
+          levelDefinitions,
+        );
+
+        const xpAwarded =
+          requestedLevel > previousWeeklyBestLevel
+            ? Math.max(
+                0,
+                requestedWeeklyReward -
+                  previousWeeklyReward,
+              )
+            : 0;
+
+        const previousBestLevel =
+          normalizeStoredNonNegativeInteger(
+            gameData.bestLevel,
+          );
+
+        const previousBestScore =
+          normalizeStoredNullableNonNegativeInteger(
+            gameData.bestScore,
+          );
+
+        const previousBestBricks =
+          normalizeStoredNullableNonNegativeInteger(
+            gameData.bestBricks,
+          );
+
+        const previousBestTimeMs =
+          normalizeStoredNullablePositiveInteger(
+            gameData.bestTimeMs,
+          );
+
+        let nextBestLevel =
+          previousBestLevel;
+
+        let nextBestScore =
+          previousBestScore;
+
+        let nextBestBricks =
+          previousBestBricks;
+
+        let nextBestTimeMs =
+          previousBestTimeMs;
+
+        let statsImproved = false;
+
+        /*
+         * Higher difficulty replaces the primary best-run
+         * profile. Equal difficulty can improve its stats.
+         * Lower difficulty runs remain in lastResult only.
+         */
+        if (requestedLevel > previousBestLevel) {
+          nextBestLevel = requestedLevel;
+          nextBestScore = score;
+          nextBestBricks = bricks;
+          nextBestTimeMs = timeMs;
+          statsImproved = true;
+        } else if (
+          requestedLevel === previousBestLevel
+        ) {
+          const improvedScore =
+            previousBestScore === null ||
+            score > previousBestScore;
+
+          const improvedBricks =
+            previousBestBricks === null ||
+            bricks > previousBestBricks;
+
+          const improvedTime =
+            previousBestTimeMs === null ||
+            timeMs > previousBestTimeMs;
+
+          if (improvedScore) {
+            nextBestScore = score;
+          }
+
+          if (improvedBricks) {
+            nextBestBricks = bricks;
+          }
+
+          if (improvedTime) {
+            nextBestTimeMs = timeMs;
+          }
+
+          statsImproved =
+            improvedScore ||
+            improvedBricks ||
+            improvedTime;
+        }
+
+        const nextWeeklyBestLevel = Math.max(
+          previousWeeklyBestLevel,
+          requestedLevel,
+        );
+
+        const previousTotalXP =
+          normalizeStoredNonNegativeInteger(
+            stateData.totalXP,
+          );
+
+        const resultingTotalXP =
+          previousTotalXP + xpAwarded;
+
+        const resultingRank =
+          getRankForXP(resultingTotalXP);
+
+        const resultingLevel =
+          getLevelForXP(resultingTotalXP);
+
+        const previousWeeklyXP =
+          stateData.weeklyWeekKey === weekKey
+            ? normalizeStoredNonNegativeInteger(
+                stateData.weeklyXP,
+              )
+            : 0;
+
+        const resultingWeeklyXP =
+          previousWeeklyXP + xpAwarded;
+
+        const completedQuestIds =
+          normalizeStringArray(
+            stateData.completedQuestIds,
+          );
+
+        const questCompletionCounts =
+          normalizeCompletionCounts(
+            stateData.questCompletionCounts,
+          );
+
+        const nextCompletedQuestIds =
+          completedQuestIds.includes(GAME_ID)
+            ? completedQuestIds
+            : [...completedQuestIds, GAME_ID];
+
+        const nextCompletionCount =
+          (questCompletionCounts[GAME_ID] ?? 0) + 1;
+
+        const now = FieldValue.serverTimestamp();
+
+        transaction.set(
+          gameRef,
+          {
+            gameId: GAME_ID,
+            moduleId: MODULE_ID,
+            orgId,
+            memberId,
+
+            completed: true,
+
+            weeklyWeekKey: weekKey,
+            weeklyBestLevel:
+              nextWeeklyBestLevel,
+
+            bestLevel: nextBestLevel,
+            bestScore: nextBestScore,
+            bestBricks: nextBestBricks,
+            bestTimeMs: nextBestTimeMs,
+
+            lastResult: {
+              level: requestedLevel,
+
+              score,
+              bricks,
+              timeMs,
+              cleared,
+
+              maximumBricks,
+              xpAwarded,
+
+              completedAt: now,
+            },
+
+            updatedAt: now,
+
+            ...(gameSnapshot.exists
+              ? {}
+              : {
+                  createdAt: now,
+                }),
+          },
+          {
+            merge: true,
+          },
+        );
+
+        transaction.set(
+          stateRef,
+          {
+            moduleId: MODULE_ID,
+            orgId,
+            memberId,
+
+            totalXP: resultingTotalXP,
+            rank: resultingRank,
+            level: resultingLevel,
+
+            weeklyXP: resultingWeeklyXP,
+            weeklyWeekKey: weekKey,
+
+            completedQuestIds:
+              nextCompletedQuestIds,
+
+            questCompletionCounts: {
+              ...questCompletionCounts,
+              [GAME_ID]:
+                nextCompletionCount,
+            },
+
+            updatedAt: now,
+
+            ...(stateSnapshot.exists
+              ? {}
+              : {
+                  activeQuestIds: [],
+                  createdAt: now,
+                }),
+          },
+          {
+            merge: true,
+          },
+        );
+
+        transaction.set(activityRef, {
+          activityId: activityRef.id,
+
+          system: MODULE_ID,
+          moduleId: MODULE_ID,
+
+          orgId,
+          memberId,
+
+          eventType:
+            xpAwarded > 0
+              ? "arcade_tier_complete"
+              : "arcade_run",
+
+          xpChange: xpAwarded,
+
+          questId: GAME_ID,
+          gameId: GAME_ID,
+          rewardId: null,
+
+          source: "nebula_break",
+
+          meta: {
+            weekKey,
+
+            submittedLevel:
+              requestedLevel,
+
+            previousWeeklyBestLevel,
+            resultingWeeklyBestLevel:
+              nextWeeklyBestLevel,
+
+            statsImproved,
+
+            score,
+            bricks,
+            timeMs,
+            cleared,
+            maximumBricks,
+
+            previousTotalXP,
+            resultingTotalXP,
+
+            resultingRank,
+            resultingLevel,
+
+            resultingWeeklyXP,
+            weeklyWeekKey: weekKey,
+          },
+
+          occurredAt: now,
+          createdAt: now,
+        });
+
+        return {
+          weekKey,
+
+          submittedLevel:
+            requestedLevel,
+
+          weeklyBestLevel:
+            nextWeeklyBestLevel,
+
+          xpAwarded,
+          statsImproved,
+
+          bestLevel:
+            nextBestLevel,
+
+          bestScore:
+            nextBestScore,
+
+          bestBricks:
+            nextBestBricks,
+
+          bestTimeMs:
+            nextBestTimeMs,
+
+          cleared,
+          maximumBricks,
+        };
+      },
+    );
+
+    const [player, activeQuests] =
+      await Promise.all([
+        getPlayer(orgId, memberId),
+        getActiveQuests(orgId, memberId),
+      ]);
+
+    if (!player) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Nebula Break was recorded, but updated member progress could not be loaded.",
+        },
+        { status: 500 },
+      );
+    }
+
+    const progress = getRankProgress(
+      player.totalXP,
+    );
+
+    return NextResponse.json({
+      success: true,
+
+      orgId,
+      memberId,
+      gameId: GAME_ID,
+
+      result,
+      activeQuests,
+
+      player: {
+        memberId: player.memberId,
+        orgId: player.orgId,
+
+        displayName:
+          player.displayName ?? null,
+
+        totalXP: player.totalXP,
+        rank: player.rank,
+        level: player.level,
+
+        weeklyXP: player.weeklyXP,
+        weeklyWeekKey:
+          player.weeklyWeekKey,
+
+        progress,
+      },
+    });
+  } catch (error: unknown) {
+    console.error(
+      "[bitgalaxy:complete-nebula-break:POST]",
+      error,
+    );
+
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to complete Nebula Break.";
+
+    if (
+      message.startsWith(
+        "MEMBER_NOT_FOUND:",
+      )
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Member profile not found.",
+        },
+        { status: 404 },
+      );
+    }
+
+    if (
+      message.startsWith(
+        "MEMBER_NOT_CONNECTED:",
+      )
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Member is not connected to this organization.",
+        },
+        { status: 403 },
+      );
+    }
+
+    const status = getErrorStatus(error);
+
     return NextResponse.json(
       {
-        error: error?.message ?? "Failed to complete Nebula Break quest",
+        success: false,
+        error:
+          status === 500
+            ? "Failed to complete Nebula Break."
+            : message,
       },
-      { status: 500 },
+      { status },
     );
   }
+}
+
+function getMaximumBricksForLevel(
+  level: DifficultyLevel,
+): number {
+  const rows =
+    5 + (level - 1) * 2;
+
+  return rows * BRICK_COLUMNS;
+}
+
+function normalizeRequiredString(
+  value: unknown,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return normalized || null;
+}
+
+function normalizeOptionalString(
+  value: unknown,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return normalized || null;
+}
+
+function normalizeLevel(
+  value: unknown,
+): DifficultyLevel | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isInteger(parsed) ||
+    parsed < 1 ||
+    parsed > 3
+  ) {
+    return null;
+  }
+
+  return parsed as DifficultyLevel;
+}
+
+function normalizePositiveInteger(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed <= 0
+  ) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeNonNegativeInteger(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0
+  ) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeBoolean(
+  value: unknown,
+): boolean | null {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  return null;
+}
+
+function normalizeStoredNonNegativeInteger(
+  value: unknown,
+): number {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0
+  ) {
+    return 0;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeStoredNullableNonNegativeInteger(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0
+  ) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeStoredNullablePositiveInteger(
+  value: unknown,
+): number | null {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed <= 0
+  ) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeStringArray(
+  value: unknown,
+): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      value
+        .filter(
+          (entry): entry is string =>
+            typeof entry === "string",
+        )
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function normalizeCompletionCounts(
+  value: unknown,
+): Record<string, number> {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return {};
+  }
+
+  const normalized: Record<string, number> =
+    {};
+
+  for (const [rawKey, rawValue] of Object.entries(
+    value,
+  )) {
+    const key = rawKey.trim();
+
+    if (!key) {
+      continue;
+    }
+
+    normalized[key] =
+      normalizeStoredNonNegativeInteger(
+        rawValue,
+      );
+  }
+
+  return normalized;
+}
+
+function resolveLevelDefinitions(
+  metadata: unknown,
+  fallbackXP: number,
+): LevelDefinition[] {
+  const metadataRecord =
+    metadata &&
+    typeof metadata === "object" &&
+    !Array.isArray(metadata)
+      ? (metadata as Record<
+          string,
+          unknown
+        >)
+      : {};
+
+  const rawLevels = Array.isArray(
+    metadataRecord.levels,
+  )
+    ? metadataRecord.levels
+    : [];
+
+  const normalizedFallbackXP = Math.max(
+    0,
+    Math.floor(
+      Number.isFinite(Number(fallbackXP))
+        ? Number(fallbackXP)
+        : 75,
+    ),
+  );
+
+  return FALLBACK_LEVELS.map(
+    (fallbackDefinition) => {
+      const configuredDefinition =
+        rawLevels.find((entry) => {
+          if (
+            !entry ||
+            typeof entry !== "object" ||
+            Array.isArray(entry)
+          ) {
+            return false;
+          }
+
+          return (
+            Number(
+              (
+                entry as Record<
+                  string,
+                  unknown
+                >
+              ).level,
+            ) === fallbackDefinition.level
+          );
+        });
+
+      if (
+        !configuredDefinition ||
+        typeof configuredDefinition !==
+          "object"
+      ) {
+        return {
+          level:
+            fallbackDefinition.level,
+
+          xp:
+            fallbackDefinition.level *
+            normalizedFallbackXP,
+        };
+      }
+
+      const configuredData =
+        configuredDefinition as Record<
+          string,
+          unknown
+        >;
+
+      const configuredXP =
+        normalizeStoredNonNegativeInteger(
+          configuredData.xp,
+        );
+
+      return {
+        level:
+          fallbackDefinition.level,
+
+        xp:
+          configuredXP > 0
+            ? configuredXP
+            : fallbackDefinition.level *
+              normalizedFallbackXP,
+      };
+    },
+  );
+}
+
+function xpForLevel(
+  level: number,
+  levels: LevelDefinition[],
+): number {
+  if (level <= 0) {
+    return 0;
+  }
+
+  return (
+    levels.find(
+      (definition) =>
+        definition.level === level,
+    )?.xp ?? 0
+  );
+}
+
+function getErrorStatus(
+  error: unknown,
+): number {
+  if (
+    error &&
+    typeof error === "object" &&
+    "status" in error
+  ) {
+    const status = Number(
+      (error as { status?: unknown })
+        .status,
+    );
+
+    if (
+      Number.isInteger(status) &&
+      status >= 400 &&
+      status <= 599
+    ) {
+      return status;
+    }
+  }
+
+  return 500;
 }
